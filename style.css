@@ -1,0 +1,217 @@
+/* Equity research report styling for pandoc HTML output */
+:root {
+  --bg: #f6f1e7;
+  --paper: #fffaf1;
+  --ink: #1f1c19;
+  --ink-muted: #5a524c;
+  --accent: #0d4a6b;
+  --accent-soft: #dfe8ee;
+  --rule: #e2d7c7;
+  --table-border: #d6c8b5;
+  --code-bg: #f2e9dc;
+  --shadow: rgba(0, 0, 0, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Source Serif 4", "Source Serif Pro", "Georgia", "Times New Roman", serif;
+  font-size: 18px;
+  line-height: 1.65;
+}
+
+main,
+article {
+  display: block;
+}
+
+body > * {
+  max-width: 1100px;
+  margin: 32px auto;
+  padding: 32px 36px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  box-shadow: 0 10px 30px var(--shadow);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: "Source Sans 3", "Source Sans Pro", "Helvetica Neue", Arial, sans-serif;
+  letter-spacing: 0.01em;
+  color: var(--ink);
+  margin: 1.6em 0 0.6em;
+  line-height: 1.25;
+}
+
+h1 {
+  font-size: 2.4rem;
+  margin-top: 0;
+  border-bottom: 3px solid var(--accent);
+  padding-bottom: 0.4em;
+}
+
+h2 {
+  font-size: 1.7rem;
+  color: var(--accent);
+  border-top: 1px solid var(--rule);
+  padding-top: 0.8em;
+}
+
+h3 {
+  font-size: 1.3rem;
+}
+
+h4 {
+  font-size: 1.1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+}
+
+p {
+  margin: 0 0 1em;
+}
+
+strong {
+  color: var(--ink);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+a:hover,
+a:focus {
+  border-bottom-color: var(--accent);
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 2em 0;
+}
+
+blockquote {
+  margin: 1.5em 0;
+  padding: 0.7em 1.2em;
+  border-left: 4px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink-muted);
+}
+
+ul,
+ol {
+  padding-left: 1.4em;
+  margin: 0 0 1em;
+}
+
+li {
+  margin-bottom: 0.35em;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5em 0;
+  font-size: 0.95em;
+}
+
+th,
+td {
+  border: 1px solid var(--table-border);
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: var(--accent-soft);
+  font-family: "Source Sans 3", "Source Sans Pro", "Helvetica Neue", Arial, sans-serif;
+  font-weight: 600;
+}
+
+tbody tr:nth-child(even) {
+  background: #f9f4ec;
+}
+
+code,
+pre {
+  font-family: "SFMono-Regular", "Consolas", "Liberation Mono", "Courier New", monospace;
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+}
+
+code {
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+}
+
+pre {
+  padding: 1em;
+  overflow-x: auto;
+  border-radius: 6px;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--rule);
+  box-shadow: 0 6px 18px var(--shadow);
+  margin: 1em 0;
+}
+
+/* Pandoc TOC styling */
+#TOC {
+  background: #f2ece2;
+  border: 1px solid var(--rule);
+  padding: 16px 20px;
+  margin: 0 0 2em;
+}
+
+#TOC > ul {
+  margin: 0;
+  padding-left: 1em;
+}
+
+#TOC a {
+  color: var(--ink);
+}
+
+/* Footer-like metadata styling (pandoc default is often paragraphs) */
+.metadata,
+.title,
+.date {
+  font-family: "Source Sans 3", "Source Sans Pro", "Helvetica Neue", Arial, sans-serif;
+  color: var(--ink-muted);
+}
+
+@media (max-width: 900px) {
+  body {
+    font-size: 16px;
+  }
+
+  body > * {
+    margin: 16px;
+    padding: 20px 22px;
+  }
+
+  h1 {
+    font-size: 2rem;
+  }
+}
