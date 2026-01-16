@@ -1,18 +1,15 @@
-# Equity Research and Portfolio Management Skills
+# Stock Research Agent
 
-A collection of Claude Code skills for automated equity research and portfolio analysis.
+Automated equity research report generation using multi-phase data gathering and AI-powered analysis.
 
 ## Overview
 
-**Stock Research Skills** - Automated equity research report generation using multi-phase data gathering and AI-powered analysis
-
-All skills can be run independently or orchestrated together for complex workflows.Quick Start
+The Stock Research Agent performs comprehensive equity research on individual stocks, gathering data from multiple sources and generating professional analyst-style reports with technical analysis, fundamental data, competitive positioning, and investment thesis.
 
 ### Quick Start
 ```bash
-# Clone the git repo including this file into a project directory like mcpskills
-git clone https://github.com/druce/MCP.git
-cd MCP/mcpskills
+# Navigate to the project directory
+cd stock_research_agent
 
 # Create conda environment, OpenBB needs < 3.14
 conda create --name mcpskills python=3.11
@@ -51,7 +48,7 @@ cp dot-env.txt .env
 ## Project Structure
 
 ```
-mcpskills/
+stock_research_agent/
 ├── work/                # Stock research outputs
 │   └── {SYMBOL}_{YYYYMMDD}/  # Per-stock research directories
 │       ├── 00_metadata.json
@@ -66,13 +63,6 @@ mcpskills/
 │       ├── final_report.md
 │       ├── final_report.docx
 │       └── final_report.html
-├── import/              # Fidelity CSV exports for portfolio analysis (Portfolio_Positions_*.csv)
-├── data/                # Aggregated portfolio data and mappings
-│   ├── aggregate_positions.csv
-│   ├── aggregate_positions_YYYYMMDD.csv
-│   └── security_mapping.csv
-├── dataviz/             # Interactive portfolio visualizations
-│   └── allocation_sunburst_YYYYMMDD.html
 ├── skills/              # All executable skills
 │   ├── research_stock.py          # Research orchestrator
 │   ├── lookup_ticker.py
@@ -86,8 +76,6 @@ mcpskills/
 │   ├── research_deep.py
 │   ├── research_final.py
 │   ├── filter_peers.py
-│   ├── aggregate_positions.py
-│   ├── visualize_allocation.py
 │   └── README.md                  # Detailed skill documentation
 ├── templates/           # Jinja2 report templates
 │   ├── equity_research_report.md.j2
@@ -257,9 +245,8 @@ Peer filtering utility - filters and ranks peer companies based on relevance cri
 This project requires **Python 3.11** (for OpenBB compatibility). Use conda for environment management:
 
 ```bash
-# Clone the git repo including this file
-git clone https://github.com/druce/MCP.git
-cd MCP/mcpskills
+# Navigate to project directory
+cd stock_research_agent
 
 # Create conda environment, OpenBB needs < 3.14
 conda create --name mcpskills python=3.11
@@ -353,12 +340,12 @@ brew install pandoc
 
 ### Dependencies
 
-**Core (Both Systems):**
+**Core:**
 - Python 3.11+
 - pandas >= 2.0
 - python-dotenv
 
-**Stock Research - Data Gathering:**
+**Data Gathering:**
 - yfinance (stock data and fundamentals - primary data source)
 - finnhub-python (peer company detection and symbol validation - recommended)
 - openbb (OpenBB Platform - optional fallback for peers)
@@ -370,7 +357,7 @@ brew install pandoc
 - beautifulsoup4 (for HTML parsing)
 - wikipediaapi (for Wikipedia data)
 
-**Stock Research - Report Generation:**
+**Report Generation:**
 - jinja2 (for report templating)
 - anthropic (for Claude API access)
 - claude-agent-sdk (for MCP server integration in deep research)
@@ -378,9 +365,6 @@ brew install pandoc
 - python-docx (optional, for Word document generation)
 - lxml (for XML/HTML parsing)
 - markdown (optional, for HTML report generation)
-
-**Portfolio Management:**
-- plotly >= 5.0 (for visualizations)
 
 ### MCP Server Configuration (Optional)
 
@@ -413,9 +397,7 @@ Skills should follow these conventions:
 7. **Documentation:** Update `skills/README.md` with skill details
 8. **Return codes:** Return 0 for success, 1 for failure
 
-## Workflows
-
-### Stock Research Workflow
+## Workflow
 
 Complete equity research for a stock:
 
@@ -450,20 +432,16 @@ Complete equity research for a stock:
 
 ## File Locations
 
-**Stock Research:**
 - **Skills:** `skills/research_*.py` - Research phase scripts
 - **Templates:** `templates/*.md.j2` - Jinja2 report templates
 - **Work Output:** `work/{SYMBOL}_{YYYYMMDD}/` - Per-stock research directories
-
-**Documentation:**
-- **skills/README.md** - Comprehensive skill documentation (1000+ lines)
-- **CLAUDE.md** - Instructions for Claude Code
-- **EQUITY_RESEARCH_PROCESS.md** - Detailed research workflow
-- **spec.md** - Portfolio skills development plan
+- **Documentation:**
+  - **skills/README.md** - Comprehensive skill documentation
+  - **CLAUDE.md** - Instructions for Claude Code
+  - **EQUITY_RESEARCH_PROCESS.md** - Detailed research workflow
 
 ## Important Notes
 
-**Stock Research:**
 - All skills are executable: `chmod +x skills/*.py`
 - Working directory auto-set to script location on startup
 - Older work directories deleted by default (use `--skip-cleanup` to preserve)
@@ -474,13 +452,13 @@ Complete equity research for a stock:
 ## Related Files
 
 See also:
-- **skills/README.md** - Detailed documentation of all skills (1000+ lines)
+- **skills/README.md** - Detailed documentation of all skills
 - **CLAUDE.md** - Development guide for Claude Code
 - **EQUITY_RESEARCH_PROCESS.md** - Research workflow and best practices
 
 ## License
 
-This is a personal research and portfolio management tool. No license specified.
+This is a personal stock research tool. No license specified.
 
 ## Support
 

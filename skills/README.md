@@ -1,12 +1,8 @@
-# Research and Portfolio Skills
+# Stock Research Skills
 
-This directory contains standalone skills for portfolio analysis and securities research.
+This directory contains standalone skills for automated equity research.
 
 ## Overview
-
-Skills are organized into two categories:
-1. **Portfolio Management Skills** - Aggregate and visualize your Fidelity portfolio positions
-2. **Securities Research Skills** - Research individual securities with comprehensive data gathering and analysis
 
 All skills follow a consistent architecture:
 - Standalone executable Python scripts (`#!/opt/anaconda3/envs/mcpskills/bin/python3`)
@@ -14,193 +10,9 @@ All skills follow a consistent architecture:
 - Self-contained with comprehensive error handling
 - Create output directories as needed
 
-## Portfolio Management Skills
+## Research Skills
 
-### 1. aggregate_positions.py
-
-Aggregates Fidelity portfolio positions from multiple CSV exports into a single consolidated file.
-
-**Purpose:**
-- Consolidate positions across multiple accounts (Individual, ROTH IRA, Rollover IRA, SEP-IRA, Traditional IRA)
-- Create archival snapshots of portfolio state
-- Prepare data for further analysis and categorization
-
-**Usage:**
-```bash
-# From project root directory (uses default directories)
-./skills/aggregate_positions.py
-
-# Or with custom directories
-./skills/aggregate_positions.py --import-dir import --output-dir data
-
-# Or with explicit python
-/opt/anaconda3/envs/mcpskills/bin/python3 skills/aggregate_positions.py
-```
-
-**Arguments:**
-- `--import-dir DIR`: Directory containing Fidelity CSV exports (default: `./import`)
-- `--output-dir DIR`: Directory for output files (default: `./data`)
-
-**Input:**
-- CSV files exported from Fidelity accounts
-- Expected format: `Portfolio_Positions_*.csv`
-- Files should contain columns: Symbol, Description, Quantity, Last Price, Current Value, Cost Basis Total, Type
-
-**Output:**
-- `data/aggregate_positions.csv`: Current aggregated positions (overwrites on each run)
-- `data/aggregate_positions_YYYYMMDD.csv`: Dated archive (e.g., `aggregate_positions_20251213.csv`)
-- Creates `data/` directory automatically if it doesn't exist
-
-**Output Format:**
-```csv
-symbol,description,quantity,last_price,value,average_cost_basis,total_cost_basis,type
-Cash,Cash,785569.38,,785569.38,,0.00,Cash
-OAKMX,OAKMARK FUND INVESTOR CLASS,649.23,173.64,112732.12,50.48,32770.54,Margin
-...
-```
-
-**Special Handling:**
-- Cash positions: Aggregates FDRXX**, Pending Activity, and Cash into single "Cash" position
-- Short positions: Maintains negative values (e.g., TSLA short)
-- Cost basis: Calculates weighted average from aggregated totals
-- Multiple accounts: Sums quantities and values across all accounts
-
-**Example Output:**
-```
-============================================================
-Fidelity Portfolio Aggregation
-============================================================
-Reading CSV files from: import
-Found 5 CSV file(s)
-  - Loaded: Portfolio_Positions_Dec-12-2025.csv (4 rows)
-  - Loaded: Portfolio_Positions_Dec-12-2025 (1).csv (10 rows)
-  ...
-
-Combined data: 39 total rows
-Aggregated to 19 unique positions
-Total portfolio value: $1,441,789.58
-
-✓ Saved current positions to: data/aggregate_positions.csv
-✓ Saved archive to: data/aggregate_positions_20251213.csv
-```
-
-## Workflow
-
-The typical workflow for using these skills:
-
-1. **Export Data from Fidelity**
-   - Download CSV files for each account
-   - Place all CSV files in the `import/` directory
-
-2. **Aggregate Positions**
-   ```bash
-   ./skills/aggregate_positions.py
-   ```
-   - Creates `data/` directory if needed
-   - Creates `data/aggregate_positions.csv` with current data
-   - Creates dated archive `data/aggregate_positions_YYYYMMDD.csv`
-
-3. **Create/Update Security Mapping**
-   - Edit `data/security_mapping.csv` to map securities to categories
-   - Define L1 (GROWTH/DEFLATION/INFLATION/CASH) through L4 hierarchy
-   - Add new securities as they're purchased
-
-4. **Visualize Allocation**
-   ```bash
-   ./skills/visualize_allocation.py
-   ```
-   - Creates `dataviz/` directory if needed
-   - Generates interactive sunburst chart
-   - Open `dataviz/allocation_sunburst_YYYYMMDD.html` in browser
-
-5. **Further Analysis** (planned)
-   - Compare against target allocations
-   - Generate rebalancing recommendations
-   - Analyze historical trends
-
-### 2. visualize_allocation.py
-
-Creates interactive HTML sunburst chart showing portfolio allocation by category hierarchy.
-
-**Purpose:**
-- Visualize portfolio allocation across the 4-level category hierarchy
-- Enable drill-down navigation through categories (L1 → L2 → L3 → L4 → Symbol)
-- Provide detailed position information on hover
-- Generate standalone HTML files viewable in any browser
-
-**Usage:**
-```bash
-# From project root directory (uses default directories)
-./skills/visualize_allocation.py
-
-# Or with custom directories
-./skills/visualize_allocation.py --data-dir data --output-dir dataviz
-
-# Or with explicit python
-/opt/anaconda3/envs/mcpskills/bin/python3 skills/visualize_allocation.py
-```
-
-**Arguments:**
-- `--data-dir DIR`: Directory containing data files (default: `./data`)
-- `--output-dir DIR`: Directory for output visualizations (default: `./dataviz`)
-
-**Input:**
-- `data/aggregate_positions.csv`: Aggregated portfolio positions
-- `data/security_mapping.csv`: Symbol-to-category mappings
-
-**Output:**
-- `dataviz/allocation_sunburst_YYYYMMDD.html`: Interactive sunburst chart
-- Creates `dataviz/` directory automatically if it doesn't exist
-
-**Features:**
-- **Interactive Drill-Down**: Click any category or security to zoom in/out
-- **Hierarchical View**: Navigate through L1 (GROWTH/DEFLATION/INFLATION/CASH) → L2 (US/INTERNATIONAL/TREASURY/etc) → L3 → L4 → Symbol
-- **Hover Information**:
-  - Security name/category
-  - Current value (with proper handling of short positions)
-  - Percentage of total portfolio
-  - Quantity and last price (for individual securities)
-  - Position type (Cash, Margin, Short)
-  - Description
-- **Visual Design**:
-  - Color-coded segments for easy identification
-  - Percentage labels on each segment
-  - Responsive sizing (1200x800px default)
-  - Clean white borders between segments
-
-**Example Output:**
-```
-============================================================
-Fidelity Portfolio Visualization
-============================================================
-Loading data from: data
-  ✓ Loaded 19 positions
-  ✓ Loaded 20 security mappings
-
-✓ Prepared 19 securities for visualization
-  Total portfolio value: $1,441,789.58
-
-Building hierarchical structure...
-
-✓ Saved visualization to: dataviz/allocation_sunburst_20251213.html
-
-============================================================
-SUCCESS: Visualization created!
-============================================================
-
-Open in browser: dataviz/allocation_sunburst_20251213.html
-```
-
-**Special Handling:**
-- Short positions: Uses absolute value for sizing, displays actual (negative) value on hover
-- Unmapped securities: Warns about unmapped symbols but continues with mapped positions
-- Empty categories: Only displays categories that contain positions
-
----
-
-## Securities Research Skills
-
-The securities research skills perform comprehensive equity research on individual stocks, gathering data from multiple sources and generating analyst-style reports.
+The research skills perform comprehensive equity research on individual stocks, gathering data from multiple sources and generating analyst-style reports.
 
 ### Research Workflow
 
@@ -948,13 +760,6 @@ fund_data = read_fundamentals('work/TSLA_20251220')
 ---
 
 ## Future Skills (Planned)
-
-**Portfolio Management:**
-- `analyze_allocation.py`: Compare actual vs target allocations
-- `rebalance_suggest.py`: Generate trade recommendations
-- `historical_analysis.py`: Track allocation changes over time using archived snapshots
-
-**Securities Research:**
 - Enhanced agent-based synthesis in research_stock_v3.py
 - Options analysis skill
 - Earnings call transcript analysis
@@ -973,11 +778,7 @@ fund_data = read_fundamentals('work/TSLA_20251220')
 
 **Python Packages:**
 
-*Portfolio Management:*
-- pandas >= 2.0
-- plotly >= 5.0 (for visualizations)
-
-*Securities Research (Data Gathering):*
+*Data Gathering:*
 - yfinance (stock data and fundamentals - primary data source)
 - finnhub-python (peer detection and symbol validation - recommended)
 - openbb (OpenBB Platform - optional fallback for peer lookup)
@@ -991,7 +792,7 @@ fund_data = read_fundamentals('work/TSLA_20251220')
 - wikipediaapi (for Wikipedia data)
 - python-dotenv (for environment variable management)
 
-*Securities Research (Report Generation):*
+*Report Generation:*
 - jinja2 (for report templating)
 - anthropic (for Claude API access)
 - claude-agent-sdk (for MCP server integration in deep research)
