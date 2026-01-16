@@ -1,4 +1,4 @@
-#!/opt/anaconda3/envs/mcpskills/bin/python3
+#!/usr/bin/env python3
 """
 Final Report Assembly Phase
 
@@ -13,35 +13,59 @@ Output:
     - final_report.html (if pandoc or markdown available)
 """
 
-import os
 import sys
+import os
 import argparse
 import json
-from datetime import datetime
-from pathlib import Path
-import pandas as pd
+import logging
 import subprocess
 import re
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Tuple
+import pandas as pd
 
 # Template engine
 from jinja2 import Environment, FileSystemLoader
 
+# Import configuration
+from config import (
+    TEMPLATES_DIR,
+    FINAL_REPORT_TEMPLATE,
+    DATE_FORMAT_FILE,
+)
 
-def load_all_data(work_dir, symbol):
+# Import utilities
+from utils import (
+    setup_logging,
+    validate_symbol,
+    ensure_directory,
+)
+
+# Set up logging
+logger = setup_logging(__name__)
+
+
+def load_all_data(work_dir: Path, symbol: str) -> Dict[str, Any]:
     """
     Load all research data including deep research output.
 
-    Extends the load_data function from research_report.py.
+    Extends the load_data function from research_report.py with additional
+    deep research data.
 
     Args:
         work_dir: Work directory path
         symbol: Stock ticker symbol
 
     Returns:
-        dict: Dictionary containing all research data
+        Dictionary containing all research data
+
+    Example:
+        >>> from pathlib import Path
+        >>> data = load_all_data(Path('work/TSLA_20260116'), 'TSLA')
     """
     # Start with basic structure
-    data = {
+    data: Dict[str, Any] = {
         'symbol': symbol,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'company_name': 'N/A',
@@ -49,34 +73,48 @@ def load_all_data(work_dir, symbol):
         'industry': 'N/A',
         'latest_price': 'N/A',
         'market_cap': 'N/A',
+        'revenue': 'N/A',
+        'profit_margin': 'N/A',
+        'roe': 'N/A',
+        'trailing_pe': 'N/A',
     }
 
     # Load technical analysis
-    tech_path = os.path.join(work_dir, '01_technical/technical_analysis.json')
-    if os.path.exists(tech_path):
-        with open(tech_path, 'r') as f:
-            data['technical_analysis'] = json.load(f)
-            if 'latest_price' in data['technical_analysis']:
-                data['latest_price'] = f"{data['technical_analysis']['latest_price']:.2f}"
+    tech_path = work_dir / '01_technical' / 'technical_analysis.json'
+    if tech_path.exists():
+        try:
+            with tech_path.open('r') as f:
+                data['technical_analysis'] = json.load(f)
+                if 'latest_price' in data['technical_analysis']:
+                    data['latest_price'] = f"{data['technical_analysis']['latest_price']:.2f}"
+        except (IOError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load technical analysis: {e}")
 
     # Load peers list with enhanced metrics
-    peers_path = os.path.join(work_dir, '01_technical/peers_list.json')
-    ratios_path = os.path.join(work_dir, '02_fundamental/key_ratios.csv')
+    peers_path = work_dir / '01_technical' / 'peers_list.json'
+    ratios_path = work_dir / '02_fundamental' / 'key_ratios.csv'
 
-    if os.path.exists(peers_path):
-        with open(peers_path, 'r') as f:
-            peers_data = json.load(f)
+    if peers_path.exists():
+        try:
+            with peers_path.open('r') as f:
+                peers_data = json.load(f)
+        except (IOError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load peers data: {e}")
+            peers_data = None
 
         # Load key ratios for peer metrics
         ratios_df = None
-        if os.path.exists(ratios_path):
-            ratios_df = pd.read_csv(ratios_path)
+        if ratios_path.exists():
+            try:
+                ratios_df = pd.read_csv(ratios_path)
+            except (IOError, pd.errors.ParserError) as e:
+                logger.warning(f"Could not load ratios data: {e}")
 
         # Convert to list of dicts with enhanced metrics
-        if 'symbol' in peers_data and isinstance(peers_data['symbol'], list):
-            peers = []
+        if peers_data and 'symbol' in peers_data and isinstance(peers_data['symbol'], list):
+            peers: List[Dict[str, Any]] = []
             for i, peer_symbol in enumerate(peers_data['symbol']):
-                peer_info = {
+                peer_info: Dict[str, Any] = {
                     'symbol': peer_symbol,
                     'name': peers_data.get('name', [])[i] if i < len(peers_data.get('name', [])) else 'N/A',
                     'price': f"{peers_data.get('price', [])[i]:.2f}" if i < len(peers_data.get('price', [])) and peers_data.get('price', [])[i] else 'N/A',
@@ -100,7 +138,8 @@ def load_all_data(work_dir, symbol):
                         if pd.notna(rev_val):
                             try:
                                 peer_info['revenue'] = f"${float(rev_val)/1e9:.1f}B"
-                            except:
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"Could not format revenue for {peer_symbol}: {e}")
                                 peer_info['revenue'] = 'N/A'
                         else:
                             peer_info['revenue'] = 'N/A'
@@ -114,7 +153,8 @@ def load_all_data(work_dir, symbol):
                         if pd.notna(margin_val):
                             try:
                                 peer_info['profit_margin'] = f"{float(margin_val)*100:.1f}%"
-                            except:
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"Could not format margin for {peer_symbol}: {e}")
                                 peer_info['profit_margin'] = 'N/A'
                         else:
                             peer_info['profit_margin'] = 'N/A'
@@ -128,7 +168,8 @@ def load_all_data(work_dir, symbol):
                         if pd.notna(roe_val):
                             try:
                                 peer_info['roe'] = f"{float(roe_val)*100:.1f}%"
-                            except:
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"Could not format ROE for {peer_symbol}: {e}")
                                 peer_info['roe'] = 'N/A'
                         else:
                             peer_info['roe'] = 'N/A'
@@ -145,118 +186,155 @@ def load_all_data(work_dir, symbol):
             data['peers'] = peers[:10]
 
     # Check for chart
-    chart_path = os.path.join(work_dir, '01_technical/chart.png')
-    if os.path.exists(chart_path):
+    chart_path = work_dir / '01_technical' / 'chart.png'
+    if chart_path.exists():
         data['chart_path'] = '01_technical/chart.png'
 
     # Check for income statement Sankey chart
-    sankey_path = os.path.join(work_dir, '02_fundamental/income_statement_sankey.png')
-    if os.path.exists(sankey_path):
+    sankey_path = work_dir / '02_fundamental' / 'income_statement_sankey.png'
+    if sankey_path.exists():
         data['income_statement_sankey_path'] = '02_fundamental/income_statement_sankey.png'
 
     # Load fundamental data
-    overview_path = os.path.join(work_dir, '02_fundamental/company_overview.json')
-    if os.path.exists(overview_path):
-        with open(overview_path, 'r') as f:
-            overview = json.load(f)
-            data['company_name'] = overview.get('company_name', 'N/A')
-            data['sector'] = overview.get('sector', 'N/A')
-            data['industry'] = overview.get('industry', 'N/A')
+    overview_path = work_dir / '02_fundamental' / 'company_overview.json'
+    if overview_path.exists():
+        overview: Dict[str, Any] = {}
+        try:
+            with overview_path.open('r') as f:
+                overview = json.load(f)
+                data['company_name'] = overview.get('company_name', 'N/A')
+                data['sector'] = overview.get('sector', 'N/A')
+                data['industry'] = overview.get('industry', 'N/A')
+        except (IOError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load overview: {e}")
+        if overview.get('market_cap') != 'N/A':
+            data['market_cap'] = f"{overview['market_cap']:,.0f}"
 
-            if overview.get('market_cap') != 'N/A':
-                data['market_cap'] = f"{overview['market_cap']:,.0f}"
+        # Financial metrics
+        data['revenue'] = f"{overview.get('revenue', 0):,.0f}" if overview.get('revenue') != 'N/A' else 'N/A'
 
-            # Financial metrics
-            data['revenue'] = f"{overview.get('revenue', 0):,.0f}" if overview.get('revenue') != 'N/A' else 'N/A'
+        # Margins
+        if overview.get('profit_margin') != 'N/A' and overview.get('profit_margin') is not None:
+            data['profit_margin'] = f"{overview['profit_margin']*100:.2f}"
+        else:
+            data['profit_margin'] = 'N/A'
 
-            # Margins
-            if overview.get('profit_margin') != 'N/A' and overview.get('profit_margin') is not None:
-                data['profit_margin'] = f"{overview['profit_margin']*100:.2f}"
-            else:
-                data['profit_margin'] = 'N/A'
+        # Returns
+        if overview.get('roe') != 'N/A' and overview.get('roe') is not None:
+            data['roe'] = f"{overview['roe']*100:.2f}"
+        else:
+            data['roe'] = 'N/A'
 
-            # Returns
-            if overview.get('roe') != 'N/A' and overview.get('roe') is not None:
-                data['roe'] = f"{overview['roe']*100:.2f}"
-            else:
-                data['roe'] = 'N/A'
-
-            # Valuation
-            data['trailing_pe'] = f"{overview.get('trailing_pe', 0):.2f}" if overview.get('trailing_pe') != 'N/A' else 'N/A'
+        # Valuation
+        data['trailing_pe'] = f"{overview.get('trailing_pe', 0):.2f}" if overview.get('trailing_pe') != 'N/A' else 'N/A'
 
     # Load deep research output
-    deep_output_path = os.path.join(work_dir, '08_deep_research/deep_research_output.md')
-    if os.path.exists(deep_output_path):
-        with open(deep_output_path, 'r') as f:
-            deep_content = f.read()
-            data['deep_research_output'] = deep_content
+    deep_output_path = work_dir / '08_deep_research' / 'deep_research_output.md'
+    if deep_output_path.exists():
+        try:
+            with deep_output_path.open('r') as f:
+                deep_content = f.read()
+                data['deep_research_output'] = deep_content
 
-            # Try to extract summary and conclusion sections
-            # Look for "## 1" or "1." for summary
-            summary_match = re.search(r'#+\s*1\.?\s*.*?[Ss]ummary.*?\n+(.*?)(?=\n#+|\Z)', deep_content, re.DOTALL)
-            if summary_match:
-                data['deep_summary'] = summary_match.group(1).strip()
+                # Try to extract summary and conclusion sections
+                # Look for "## 1" or "1." for summary
+                summary_match = re.search(r'#+\s*1\.?\s*.*?[Ss]ummary.*?\n+(.*?)(?=\n#+|\Z)', deep_content, re.DOTALL)
+                if summary_match:
+                    data['deep_summary'] = summary_match.group(1).strip()
 
-            # Look for "## 12" or "12." for conclusion
-            conclusion_match = re.search(r'#+\s*12\.?\s*.*?[Cc]onclusion.*?\n+(.*?)(?=\n#+|\Z)', deep_content, re.DOTALL)
-            if conclusion_match:
-                data['deep_conclusion'] = conclusion_match.group(1).strip()
+                # Look for "## 12" or "12." for conclusion
+                conclusion_match = re.search(r'#+\s*12\.?\s*.*?[Cc]onclusion.*?\n+(.*?)(?=\n#+|\Z)', deep_content, re.DOTALL)
+                if conclusion_match:
+                    data['deep_conclusion'] = conclusion_match.group(1).strip()
+        except IOError as e:
+            logger.warning(f"Could not load deep research output: {e}")
+            data['deep_research_output'] = '*Deep research not yet completed.*'
     else:
         data['deep_research_output'] = '*Deep research not yet completed.*'
 
     return data
 
 
-def generate_final_report(data, work_dir):
-    """Generate final report using template."""
+def generate_final_report(data: Dict[str, Any], work_dir: Path) -> Path:
+    """
+    Generate final report using template.
+
+    Args:
+        data: Dictionary containing all research data
+        work_dir: Work directory path
+
+    Returns:
+        Path to generated markdown report
+
+    Example:
+        >>> from pathlib import Path
+        >>> report_path = generate_final_report(data, Path('work/TSLA_20260116'))
+    """
     # Setup Jinja2 environment
-    template_dir = 'templates'
-    env = Environment(loader=FileSystemLoader(template_dir))
+    template_dir = Path(__file__).parent.parent / TEMPLATES_DIR
+    env = Environment(loader=FileSystemLoader(str(template_dir)))
 
     # Custom filter for number formatting
-    def format_number(value):
+    def format_number(value: Any) -> str:
         try:
             return f"{int(value):,}"
-        except:
-            return value
+        except (ValueError, TypeError):
+            return str(value)
 
     env.filters['format_number'] = format_number
 
     # Load template
-    template = env.get_template('final_report.md.j2')
+    template = env.get_template(FINAL_REPORT_TEMPLATE)
 
     # Render template
     report_content = template.render(**data)
     report_content = report_content.replace('$', '\\$')
 
     # Save markdown file
-    report_path = os.path.join(work_dir, 'final_report.md')
-    with open(report_path, 'w') as f:
+    report_path = work_dir / 'final_report.md'
+    with report_path.open('w') as f:
         f.write(report_content)
 
+    logger.info(f"Saved: {report_path}")
     print(f"✓ Saved: {report_path}")
     return report_path
 
 
-def convert_to_docx(md_path, docx_path):
-    """Convert markdown to Word document using pandoc or python-docx."""
+def convert_to_docx(md_path: Path, docx_path: Path) -> bool:
+    """
+    Convert markdown to Word document using pandoc or python-docx.
+
+    Args:
+        md_path: Path to markdown file
+        docx_path: Path for output docx file
+
+    Returns:
+        True if conversion succeeded, False otherwise
+    """
     try:
         # Try pandoc first (most reliable)
         result = subprocess.run(
-            ['pandoc', md_path, '-o', docx_path],
+            ['pandoc', str(md_path), '-o', str(docx_path)],
             capture_output=True,
             text=True,
             timeout=60
         )
         if result.returncode == 0:
+            logger.info(f"Saved: {docx_path} (via pandoc)")
             print(f"✓ Saved: {docx_path} (via pandoc)")
             return True
         else:
+            logger.warning(f"Pandoc conversion failed: {result.stderr}")
             print(f"⚠ Pandoc conversion failed: {result.stderr}")
 
     except FileNotFoundError:
+        logger.info("Pandoc not found")
         print("⚠ Pandoc not found. Install with: brew install pandoc")
+    except subprocess.TimeoutExpired:
+        logger.error("Pandoc timed out after 60 seconds")
+        print(f"⚠ Pandoc timed out")
     except Exception as e:
+        logger.error(f"Pandoc error: {e}", exc_info=True)
         print(f"⚠ Pandoc error: {e}")
 
     # Try python-docx as fallback
@@ -298,44 +376,63 @@ def convert_to_docx(md_path, docx_path):
                 if line.strip():
                     doc.add_paragraph(line)
 
-        doc.save(docx_path)
+        doc.save(str(docx_path))
+        logger.info(f"Saved: {docx_path} (via python-docx)")
         print(f"✓ Saved: {docx_path} (via python-docx)")
         return True
 
     except ImportError:
+        logger.info("python-docx not found")
         print("⚠ python-docx not found. Install with: pip install python-docx")
     except Exception as e:
+        logger.error(f"python-docx error: {e}", exc_info=True)
         print(f"⚠ python-docx error: {e}")
 
     return False
 
 
-def convert_to_html(md_path, html_path):
-    """Convert markdown to HTML using pandoc or markdown library."""
+def convert_to_html(md_path: Path, html_path: Path) -> bool:
+    """
+    Convert markdown to HTML using pandoc or markdown library.
+
+    Args:
+        md_path: Path to markdown file
+        html_path: Path for output HTML file
+
+    Returns:
+        True if conversion succeeded, False otherwise
+    """
     try:
         # Try pandoc first (most reliable)
         result = subprocess.run(
-            ['pandoc', md_path, '-o', html_path, '--standalone', '--toc', '--css', 'style.css'],
+            ['pandoc', str(md_path), '-o', str(html_path), '--standalone', '--toc', '--css', 'style.css'],
             capture_output=True,
             text=True,
             timeout=60
         )
         if result.returncode == 0:
+            logger.info(f"Saved: {html_path} (via pandoc)")
             print(f"✓ Saved: {html_path} (via pandoc)")
             return True
         else:
+            logger.warning(f"Pandoc conversion failed: {result.stderr}")
             print(f"⚠ Pandoc conversion failed: {result.stderr}")
 
     except FileNotFoundError:
+        logger.info("Pandoc not found for HTML conversion")
         print("⚠ Pandoc not found for HTML conversion")
+    except subprocess.TimeoutExpired:
+        logger.error("Pandoc HTML conversion timed out")
+        print(f"⚠ Pandoc timed out")
     except Exception as e:
+        logger.error(f"Pandoc HTML error: {e}", exc_info=True)
         print(f"⚠ Pandoc error: {e}")
 
     # Try markdown library as fallback
     try:
         import markdown
 
-        with open(md_path, 'r') as f:
+        with md_path.open('r') as f:
             md_content = f.read()
 
         # Convert markdown to HTML with extensions
@@ -398,21 +495,30 @@ def convert_to_html(md_path, html_path):
 </body>
 </html>"""
 
-        with open(html_path, 'w') as f:
+        with html_path.open('w') as f:
             f.write(full_html)
 
+        logger.info(f"Saved: {html_path} (via markdown library)")
         print(f"✓ Saved: {html_path} (via markdown library)")
         return True
 
     except ImportError:
+        logger.info("markdown library not found")
         print("⚠ markdown library not found. Install with: pip install markdown")
-    except Exception as e:
+    except (IOError, Exception) as e:
+        logger.error(f"markdown library error: {e}", exc_info=True)
         print(f"⚠ markdown library error: {e}")
 
     return False
 
 
-def main():
+def main() -> int:
+    """
+    Main execution function.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
     parser = argparse.ArgumentParser(description='Final report assembly phase')
     parser.add_argument('symbol', help='Stock ticker symbol')
     parser.add_argument(
@@ -423,14 +529,14 @@ def main():
     args = parser.parse_args()
 
     # Normalize symbol
-    symbol = args.symbol.upper()
+    symbol = validate_symbol(args.symbol)
 
     # Generate work directory if not specified
     if not args.work_dir:
-        date_str = datetime.now().strftime('%Y%m%d')
-        work_dir = os.path.join('work', f'{symbol}_{date_str}')
+        date_str = datetime.now().strftime(DATE_FORMAT_FILE)
+        work_dir = Path('work') / f'{symbol}_{date_str}'
     else:
-        work_dir = args.work_dir
+        work_dir = Path(args.work_dir)
 
     print("="*60)
     print("Final Report Assembly Phase")
@@ -441,23 +547,27 @@ def main():
 
     try:
         # Load all data
+        logger.info("Loading all research data...")
         print(f"\nLoading all research data...")
         data = load_all_data(work_dir, symbol)
+        logger.info("Data loaded")
         print(f"✓ Data loaded")
 
         # Generate final report
+        logger.info("Generating final report...")
         print(f"\nGenerating final report...")
         md_path = generate_final_report(data, work_dir)
 
         # Convert to other formats
+        logger.info("Converting to additional formats...")
         print(f"\nConverting to additional formats...")
 
         # DOCX
-        docx_path = os.path.join(work_dir, 'final_report.docx')
+        docx_path = work_dir / 'final_report.docx'
         convert_to_docx(md_path, docx_path)
 
         # HTML
-        html_path = os.path.join(work_dir, 'final_report.html')
+        html_path = work_dir / 'final_report.html'
         convert_to_html(md_path, html_path)
 
         print("\n" + "="*60)
@@ -465,17 +575,21 @@ def main():
         print("="*60)
         print(f"\nOutputs:")
         print(f"  - {md_path}")
-        if os.path.exists(docx_path):
+        if docx_path.exists():
             print(f"  - {docx_path}")
-        if os.path.exists(html_path):
+        if html_path.exists():
             print(f"  - {html_path}")
 
+        logger.info("Final report assembly completed")
         return 0
 
-    except Exception as e:
+    except (IOError, KeyError) as e:
+        logger.error(f"Error in final report assembly: {e}", exc_info=True)
         print(f"\n❌ Error in final report assembly: {e}")
-        import traceback
-        traceback.print_exc()
+        return 1
+    except Exception as e:
+        logger.error(f"Unexpected error in final report assembly: {e}", exc_info=True)
+        print(f"\n❌ Error in final report assembly: {e}")
         return 1
 
 

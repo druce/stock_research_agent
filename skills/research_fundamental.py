@@ -1,4 +1,4 @@
-#!/opt/anaconda3/envs/mcpskills/bin/python3
+#!/usr/bin/env python3
 """
 Fundamental Analysis Research Phase
 
@@ -26,51 +26,77 @@ Output:
     - news.json - Recent news articles
 """
 
-import os
 import sys
 import argparse
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
-# Financial data libraries
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
+from dotenv import load_dotenv
+
+# Import configuration
+from config import (
+    WORK_DIR,
+    DATE_FORMAT_FILE,
+    MAX_ANALYST_RECOMMENDATIONS,
+    MAX_NEWS_ARTICLES,
+    CHART_SCALE,
+)
+
+# Import utilities
+from utils import (
+    setup_logging,
+    create_work_directory,
+    validate_symbol,
+    ensure_directory,
+    get_phase_directory,
+)
+
+# Set up logging
+logger = setup_logging(__name__)
 
 # Load environment variables
-from dotenv import load_dotenv
 load_dotenv()
 
 
-def save_company_overview(symbol, work_dir):
+def save_company_overview(symbol: str, work_dir: Union[str, Path]) -> bool:
     """
     Get and save company overview information.
 
+    Fetches comprehensive company information from yfinance including
+    valuation metrics, financial highlights, and corporate details.
+
     Args:
-        symbol: Stock ticker symbol
-        work_dir: Work directory path
+        symbol: Stock ticker symbol (e.g., 'TSLA', 'AAPL')
+        work_dir: Work directory path for output
 
     Returns:
-        bool: True if successful, False otherwise
+        True if successful, False otherwise
+
+    Example:
+        >>> if save_company_overview('TSLA', Path('work/TSLA_20260116')):
+        ...     print("Overview saved")
     """
     try:
-        # Check if output file already exists
-        output_dir = os.path.join(work_dir, '02_fundamental')
-        overview_path = os.path.join(output_dir, 'company_overview.json')
+        output_dir = get_phase_directory(work_dir, 'fundamental')
+        ensure_directory(output_dir)
+        overview_path = output_dir / 'company_overview.json'
 
-        if os.path.exists(overview_path):
+        if overview_path.exists():
             print(f"⊘ Company overview already exists, skipping: {overview_path}")
             return True
 
-        print(f"Getting company overview for {symbol}...")
+        logger.info(f"Getting company overview for {symbol}...")
 
-        # Get stock info from yfinance
         ticker = yf.Ticker(symbol)
         info = ticker.info
 
-        # Extract key information
         overview = {
             'symbol': symbol,
             'timestamp': datetime.now().isoformat(),
@@ -115,10 +141,7 @@ def save_company_overview(symbol, work_dir):
             'held_percent_institutions': info.get('heldPercentInstitutions', 'N/A'),
         }
 
-        # Save to file
-        os.makedirs(output_dir, exist_ok=True)
-
-        with open(overview_path, 'w') as f:
+        with overview_path.open('w') as f:
             json.dump(overview, f, indent=2)
 
         print(f"✓ Saved company overview to: {overview_path}")
@@ -128,29 +151,39 @@ def save_company_overview(symbol, work_dir):
 
         return True
 
+    except (KeyError, ValueError) as e:
+        logger.error(f"Error parsing company overview data: {e}")
+        return False
+    except IOError as e:
+        logger.error(f"Error writing company overview file: {e}")
+        return False
     except Exception as e:
-        print(f"❌ Error getting company overview: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error getting company overview: {e}", exc_info=True)
         return False
 
 
-def save_financial_statements(symbol, work_dir):
+def save_financial_statements(symbol: str, work_dir: Union[str, Path]) -> bool:
     """
     Get and save financial statements.
+
+    Fetches income statement, balance sheet, and cash flow statement
+    from yfinance and saves them as CSV files.
 
     Args:
         symbol: Stock ticker symbol
         work_dir: Work directory path
 
     Returns:
-        bool: True if successful, False otherwise
+        True if successful, False otherwise
+
+    Example:
+        >>> save_financial_statements('TSLA', Path('work/TSLA_20260116'))
     """
     try:
-        print(f"Getting financial statements for {symbol}...")
+        logger.info(f"Getting financial statements for {symbol}...")
 
-        output_dir = os.path.join(work_dir, '02_fundamental')
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = get_phase_directory(work_dir, 'fundamental')
+        ensure_directory(output_dir)
 
         income_stmt = pd.DataFrame()
         balance_sheet = pd.DataFrame()
@@ -162,46 +195,72 @@ def save_financial_statements(symbol, work_dir):
             balance_sheet = ticker.balance_sheet
             cash_flow = ticker.cashflow
         except Exception as e:
-            print(f"⚠ Failed to fetch statements from yfinance: {e}")
+            logger.warning(f"Failed to fetch statements from yfinance: {e}")
 
         # Income statement
-        income_path = os.path.join(output_dir, 'income_statement.csv')
+        income_path = output_dir / 'income_statement.csv'
         if not income_stmt.empty:
             income_stmt.to_csv(income_path)
             print(f"✓ Saved income statement to: {income_path}")
-        elif os.path.exists(income_path):
-            print(f"⊘ Using existing income statement: {income_path}")
-            income_stmt = pd.read_csv(income_path, index_col=0)
+        elif income_path.exists():
+            logger.info(f"Using existing income statement: {income_path}")
+            try:
+                income_stmt = pd.read_csv(income_path, index_col=0)
+            except Exception as e:
+                logger.warning(f"Could not read existing income statement: {e}")
 
         if not income_stmt.empty:
             save_income_statement_sankey(income_stmt, output_dir, symbol)
         else:
-            print("⊘ No income statement available; skipping Sankey chart")
+            logger.info("No income statement available; skipping Sankey chart")
 
         # Balance sheet
         if not balance_sheet.empty:
-            balance_path = os.path.join(output_dir, 'balance_sheet.csv')
+            balance_path = output_dir / 'balance_sheet.csv'
             balance_sheet.to_csv(balance_path)
             print(f"✓ Saved balance sheet to: {balance_path}")
 
         # Cash flow
         if not cash_flow.empty:
-            cashflow_path = os.path.join(output_dir, 'cash_flow.csv')
+            cashflow_path = output_dir / 'cash_flow.csv'
             cash_flow.to_csv(cashflow_path)
             print(f"✓ Saved cash flow to: {cashflow_path}")
 
         return True
 
+    except IOError as e:
+        logger.error(f"Error writing financial statements: {e}")
+        return False
     except Exception as e:
-        print(f"❌ Error getting financial statements: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error getting financial statements: {e}", exc_info=True)
         return False
 
 
-def save_income_statement_sankey(income_stmt, output_dir, symbol):
-    """Create a Sankey chart showing revenue flowing to net income."""
-    def get_value(series, keys):
+def save_income_statement_sankey(
+    income_stmt: pd.DataFrame,
+    output_dir: Path,
+    symbol: str
+) -> bool:
+    """
+    Create a Sankey chart showing revenue flowing to net income.
+
+    Visualizes how revenue flows through various expense categories
+    to arrive at net income.
+
+    Args:
+        income_stmt: DataFrame containing income statement data
+        output_dir: Directory to save Sankey chart
+        symbol: Stock ticker symbol for chart title
+
+    Returns:
+        True if successful, False otherwise
+
+    Example:
+        >>> income_df = pd.read_csv('income_statement.csv')
+        >>> save_income_statement_sankey(income_df, Path('output'), 'TSLA')
+    """
+    def get_value(series: pd.Series, keys: List[str]) -> Optional[float]:
+        """Extract value from series trying multiple key names."""
         for key in keys:
             if key in series.index:
                 value = series.loc[key]
@@ -213,7 +272,7 @@ def save_income_statement_sankey(income_stmt, output_dir, symbol):
         if income_stmt.empty:
             return False
 
-        print("Creating income statement Sankey chart...")
+        logger.info("Creating income statement Sankey chart...")
 
         latest_period = income_stmt.columns[0]
         period_label = (
@@ -225,8 +284,8 @@ def save_income_statement_sankey(income_stmt, output_dir, symbol):
 
         revenue = get_value(series, ["Total Revenue", "TotalRevenue"])
         if revenue is None:
-            print("⚠ Income statement missing total revenue; skipping Sankey chart.")
-            return
+            logger.warning("Income statement missing total revenue; skipping Sankey chart")
+            return False
 
         cost_of_revenue = get_value(series, ["Cost Of Revenue", "CostOfRevenue", "Cost Of Goods Sold"])
         gross_profit = get_value(series, ["Gross Profit", "GrossProfit"])
@@ -287,14 +346,12 @@ def save_income_statement_sankey(income_stmt, output_dir, symbol):
         ]
         node_index = {name: idx for idx, name in enumerate(nodes)}
 
-        sources = []
-        targets = []
-        values = []
+        sources: List[int] = []
+        targets: List[int] = []
+        values: List[float] = []
 
-        def add_link(source, target, value):
-            if value is None:
-                return
-            if value <= 0:
+        def add_link(source: str, target: str, value: Optional[float]) -> None:
+            if value is None or value <= 0:
                 return
             sources.append(node_index[source])
             targets.append(node_index[target])
@@ -333,34 +390,36 @@ def save_income_statement_sankey(income_stmt, output_dir, symbol):
             font=dict(size=12),
         )
 
-        sankey_path = os.path.join(output_dir, 'income_statement_sankey.html')
-        pio.write_html(fig, sankey_path, include_plotlyjs='cdn')
+        sankey_path = output_dir / 'income_statement_sankey.html'
+        pio.write_html(fig, str(sankey_path), include_plotlyjs='cdn')
         print(f"✓ Saved income statement Sankey to: {sankey_path}")
 
-        image_path = os.path.join(output_dir, 'income_statement_sankey.png')
+        image_path = output_dir / 'income_statement_sankey.png'
         try:
-            print("Saving income statement Sankey image...")
-            fig.write_image(image_path, scale=2)
+            logger.debug("Saving income statement Sankey image...")
+            fig.write_image(str(image_path), scale=CHART_SCALE)
             print(f"✓ Saved income statement Sankey image to: {image_path}")
         except Exception as e:
-            print(f"⚠ Could not save Sankey image: {e}")
+            logger.warning(f"Could not save Sankey image: {e}")
             try:
                 import kaleido
-                print("Attempting to install a compatible Chrome for Kaleido...")
+                logger.info("Attempting to install a compatible Chrome for Kaleido...")
                 kaleido.get_chrome_sync()
-                fig.write_image(image_path, scale=2)
+                fig.write_image(str(image_path), scale=CHART_SCALE)
                 print(f"✓ Saved income statement Sankey image to: {image_path}")
+            except ImportError:
+                logger.warning("Kaleido not available, skipping image export")
             except Exception as retry_error:
-                print(f"⚠ Sankey image retry failed: {retry_error}")
+                logger.warning(f"Sankey image retry failed: {retry_error}")
 
         return True
 
     except Exception as e:
-        print(f"⚠ Failed to create income statement Sankey: {e}")
+        logger.warning(f"Failed to create income statement Sankey: {e}")
         return False
 
 
-def get_financial_ratios(symbol):
+def get_financial_ratios(symbol: str) -> pd.DataFrame:
     """
     Retrieve comprehensive financial ratios for a given symbol using yfinance.
 
@@ -369,6 +428,13 @@ def get_financial_ratios(symbol):
 
     Returns:
         DataFrame with columns: Category, Metric, {symbol}
+
+    Raises:
+        ValueError: If no data available for symbol
+
+    Example:
+        >>> df = get_financial_ratios('TSLA')
+        >>> print(df[['Category', 'Metric', 'TSLA']].head())
     """
     ticker = yf.Ticker(symbol)
     info = ticker.info
@@ -376,7 +442,6 @@ def get_financial_ratios(symbol):
     if not info:
         raise ValueError(f"No data available for symbol: {symbol}")
 
-    # Organize ratios by category
     valuation_ratios = {
         'Trailing P/E': info.get('trailingPE'),
         'Forward P/E': info.get('forwardPE'),
@@ -424,7 +489,6 @@ def get_financial_ratios(symbol):
         ),
     }
 
-    # Combine all categories
     all_ratios = {
         **valuation_ratios,
         **financial_highlights,
@@ -433,7 +497,6 @@ def get_financial_ratios(symbol):
         **per_share_data
     }
 
-    # Create DataFrame
     df = pd.DataFrame(list(all_ratios.items()), columns=['Metric', symbol])
     df['Category'] = (
         ['Valuation'] * len(valuation_ratios) +
@@ -445,62 +508,63 @@ def get_financial_ratios(symbol):
     return df[["Category", "Metric", symbol]]
 
 
-def save_key_ratios(symbol, work_dir):
+def save_key_ratios(symbol: str, work_dir: Union[str, Path]) -> bool:
     """
     Calculate and save key financial ratios.
+
+    Fetches financial ratios for the primary symbol and all peer companies
+    (if available) and saves to CSV.
 
     Args:
         symbol: Stock ticker symbol
         work_dir: Work directory path
 
     Returns:
-        bool: True if successful, False otherwise
+        True if successful, False otherwise
+
+    Example:
+        >>> save_key_ratios('TSLA', Path('work/TSLA_20260116'))
     """
     try:
-        print(f"Calculating key ratios for {symbol}...")
+        logger.info(f"Calculating key ratios for {symbol}...")
 
-        # Get ratios for primary symbol
         symbol_df = get_financial_ratios(symbol)
 
-        # Try to load peers list from 01_technical directory
-        peers_list = []
-        peers_path = os.path.join(work_dir, '01_technical', 'peers_list.json')
+        # Try to load peers list from technical phase
+        peers_list: List[str] = []
+        technical_dir = Path(work_dir) / '01_technical'
+        peers_path = technical_dir / 'peers_list.json'
 
-        print(f"\nLooking for peers at: {peers_path}")
-        print(f"  File exists: {os.path.exists(peers_path)}")
+        logger.debug(f"Looking for peers at: {peers_path}")
 
-        if os.path.exists(peers_path):
+        if peers_path.exists():
             try:
-                with open(peers_path, 'r') as f:
+                with peers_path.open('r') as f:
                     peers_data = json.load(f)
 
-                print(f"  Loaded peers JSON with keys: {list(peers_data.keys())}")
+                logger.debug(f"Loaded peers JSON with keys: {list(peers_data.keys())}")
 
-                # Extract peer symbols from the JSON structure
-                # Handle different JSON structures:
-                # 1. OpenBB format: {"symbol": ["ARWR", "MTSR", ...], "name": [...], ...}
-                # 2. Results format: {"results": [{"symbol": "ARWR", ...}, ...]}
-                # 3. Simple list: {"peers_list": ["ARWR", "MTSR", ...]}
+                # Extract peer symbols from different JSON structures
                 if 'symbol' in peers_data and isinstance(peers_data['symbol'], list):
                     peers_list = [s for s in peers_data['symbol'] if s]
-                    print(f"  Extracted {len(peers_list)} peers from 'symbol' field")
+                    logger.debug(f"Extracted {len(peers_list)} peers from 'symbol' field")
                 elif 'results' in peers_data and isinstance(peers_data['results'], list):
                     peers_list = [p.get('symbol') for p in peers_data['results'] if p.get('symbol')]
-                    print(f"  Extracted {len(peers_list)} peers from 'results' field")
+                    logger.debug(f"Extracted {len(peers_list)} peers from 'results' field")
                 elif 'peers_list' in peers_data and isinstance(peers_data['peers_list'], list):
                     peers_list = peers_data['peers_list']
-                    print(f"  Extracted {len(peers_list)} peers from 'peers_list' field")
+                    logger.debug(f"Extracted {len(peers_list)} peers from 'peers_list' field")
 
                 if peers_list:
                     print(f"✓ Found {len(peers_list)} peers: {', '.join(peers_list[:5])}{'...' if len(peers_list) > 5 else ''}")
                 else:
-                    print(f"⚠ No peers extracted from JSON")
+                    logger.warning("No peers extracted from JSON")
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"Could not load peers list: {e}")
             except Exception as e:
-                print(f"⚠ Could not load peers list: {e}")
-                print("  Continuing with just the main symbol...")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"Unexpected error loading peers: {e}", exc_info=True)
         else:
+            logger.warning("No peers list found - technical phase must run first")
             print(f"\n⚠️  WARNING: No peers list found")
             print(f"  The technical phase must run BEFORE fundamental to generate the peer list.")
             print(f"  Expected file: {peers_path}")
@@ -514,16 +578,16 @@ def save_key_ratios(symbol, work_dir):
             print()
 
         # Get ratios for each peer
-        peers_dflist = []
+        peers_dflist: List[pd.Series] = []
         for peer in peers_list:
             try:
                 peer_df = get_financial_ratios(peer)
-                # Only keep the last column (the data column)
                 peers_dflist.append(peer_df.iloc[:, 2])
-                print(f"  ✓ Got ratios for {peer}")
+                logger.debug(f"Got ratios for {peer}")
+            except ValueError as e:
+                logger.warning(f"Could not get ratios for {peer}: {e}")
             except Exception as e:
-                print(f"  ⚠ Could not get ratios for {peer}: {e}")
-                continue
+                logger.warning(f"Unexpected error getting ratios for {peer}: {e}")
 
         # Concatenate original table with peer data
         if peers_dflist:
@@ -531,11 +595,10 @@ def save_key_ratios(symbol, work_dir):
         else:
             df = symbol_df
 
-        # Save to CSV
-        output_dir = os.path.join(work_dir, '02_fundamental')
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = get_phase_directory(work_dir, 'fundamental')
+        ensure_directory(output_dir)
 
-        ratios_path = os.path.join(output_dir, 'key_ratios.csv')
+        ratios_path = output_dir / 'key_ratios.csv'
         df.to_csv(ratios_path, index=False)
 
         print(f"✓ Saved key ratios to: {ratios_path}")
@@ -544,36 +607,44 @@ def save_key_ratios(symbol, work_dir):
 
         return True
 
+    except ValueError as e:
+        logger.error(f"Invalid data for key ratios: {e}")
+        return False
+    except IOError as e:
+        logger.error(f"Error writing key ratios file: {e}")
+        return False
     except Exception as e:
-        print(f"❌ Error calculating key ratios: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error calculating key ratios: {e}", exc_info=True)
         return False
 
 
-def save_analyst_recommendations(symbol, work_dir):
+def save_analyst_recommendations(symbol: str, work_dir: Union[str, Path]) -> bool:
     """
     Get and save analyst recommendations.
+
+    Fetches recent analyst recommendations from yfinance and saves to JSON.
 
     Args:
         symbol: Stock ticker symbol
         work_dir: Work directory path
 
     Returns:
-        bool: True if successful, False otherwise
+        True if successful, False otherwise
+
+    Example:
+        >>> save_analyst_recommendations('TSLA', Path('work/TSLA_20260116'))
     """
     try:
-        print(f"Getting analyst recommendations for {symbol}...")
+        logger.info(f"Getting analyst recommendations for {symbol}...")
 
         ticker = yf.Ticker(symbol)
         recommendations = ticker.recommendations
 
         if recommendations is not None and not recommendations.empty:
-            output_dir = os.path.join(work_dir, '02_fundamental')
-            os.makedirs(output_dir, exist_ok=True)
+            output_dir = get_phase_directory(work_dir, 'fundamental')
+            ensure_directory(output_dir)
 
-            # Convert to JSON-serializable format
-            recs_dict = recommendations.tail(20).to_dict(orient='records')
+            recs_dict = recommendations.tail(MAX_ANALYST_RECOMMENDATIONS).to_dict(orient='records')
 
             # Convert timestamps to strings
             for rec in recs_dict:
@@ -583,65 +654,80 @@ def save_analyst_recommendations(symbol, work_dir):
                     elif hasattr(value, 'isoformat'):
                         rec[key] = value.isoformat()
 
-            recs_path = os.path.join(output_dir, 'analyst_recommendations.json')
-            with open(recs_path, 'w') as f:
+            recs_path = output_dir / 'analyst_recommendations.json'
+            with recs_path.open('w') as f:
                 json.dump(recs_dict, f, indent=2)
 
             print(f"✓ Saved analyst recommendations to: {recs_path}")
             print(f"  Total recommendations: {len(recs_dict)}")
         else:
-            print("⊘ No analyst recommendations available")
+            logger.info("No analyst recommendations available")
 
         return True
 
+    except IOError as e:
+        logger.error(f"Error writing analyst recommendations: {e}")
+        return False
     except Exception as e:
-        print(f"❌ Error getting analyst recommendations: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error getting analyst recommendations: {e}", exc_info=True)
         return False
 
 
-def save_news(symbol, work_dir):
+def save_news(symbol: str, work_dir: Union[str, Path]) -> bool:
     """
     Get and save recent news articles.
+
+    Fetches recent news articles from yfinance and saves to JSON.
 
     Args:
         symbol: Stock ticker symbol
         work_dir: Work directory path
 
     Returns:
-        bool: True if successful, False otherwise
+        True if successful, False otherwise
+
+    Example:
+        >>> save_news('TSLA', Path('work/TSLA_20260116'))
     """
     try:
-        print(f"Getting recent news for {symbol}...")
+        logger.info(f"Getting recent news for {symbol}...")
 
         ticker = yf.Ticker(symbol)
         news = ticker.news
 
         if news:
-            output_dir = os.path.join(work_dir, '02_fundamental')
-            os.makedirs(output_dir, exist_ok=True)
+            output_dir = get_phase_directory(work_dir, 'fundamental')
+            ensure_directory(output_dir)
 
-            news_path = os.path.join(output_dir, 'news.json')
-            with open(news_path, 'w') as f:
-                json.dump(news, f, indent=2)
+            # Limit to MAX_NEWS_ARTICLES
+            news_limited = news[:MAX_NEWS_ARTICLES]
+
+            news_path = output_dir / 'news.json'
+            with news_path.open('w') as f:
+                json.dump(news_limited, f, indent=2)
 
             print(f"✓ Saved news to: {news_path}")
-            print(f"  Total articles: {len(news)}")
+            print(f"  Total articles: {len(news_limited)}")
         else:
-            print("⊘ No news available")
+            logger.info("No news available")
 
         return True
 
+    except IOError as e:
+        logger.error(f"Error writing news file: {e}")
+        return False
     except Exception as e:
-        print(f"❌ Error getting news: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error getting news: {e}", exc_info=True)
         return False
 
 
-def main():
-    """Main execution function."""
+def main() -> int:
+    """
+    Main execution function.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
     parser = argparse.ArgumentParser(
         description='Fundamental analysis research phase'
     )
@@ -654,21 +740,25 @@ def main():
         default=None,
         help='Work directory path (default: work/SYMBOL_YYYYMMDD)'
     )
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose logging'
+    )
 
     args = parser.parse_args()
 
-    # Normalize symbol
-    symbol = args.symbol.upper()
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
-    # Generate work directory if not specified
-    if not args.work_dir:
-        date_str = datetime.now().strftime('%Y%m%d')
-        work_dir = os.path.join('work', f'{symbol}_{date_str}')
+    symbol = validate_symbol(args.symbol)
+
+    if args.work_dir:
+        work_dir = Path(args.work_dir)
     else:
-        work_dir = args.work_dir
+        work_dir = create_work_directory(symbol)
 
-    # Create work directory if it doesn't exist
-    os.makedirs(work_dir, exist_ok=True)
+    ensure_directory(work_dir)
 
     print("=" * 60)
     print("Fundamental Analysis Phase")
@@ -711,7 +801,7 @@ def main():
         return 0
     elif success_count > 0:
         print(f"⚠ Partial success: {success_count}/{total_count} tasks completed")
-        return 0  # Still return success for partial completion
+        return 0
     else:
         print("❌ All tasks failed")
         return 1

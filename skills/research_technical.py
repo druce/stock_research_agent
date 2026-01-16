@@ -1,4 +1,4 @@
-#!/opt/anaconda3/envs/mcpskills/bin/python3
+#!/usr/bin/env python3
 """
 Technical Analysis Research Phase
 
@@ -20,12 +20,14 @@ Output:
     - peers_list.json - List of peer companies
 """
 
-import os
 import sys
+import os
 import argparse
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 # Financial data libraries
 import yfinance as yf
@@ -42,21 +44,69 @@ load_dotenv()
 # OpenBB for peer data
 from openbb import obb
 
+# Import configuration
+from config import (
+    MAX_PEERS_TO_FETCH,
+    SMA_SHORT_PERIOD,
+    SMA_MEDIUM_PERIOD,
+    SMA_LONG_PERIOD,
+    MA_WEEKLY_SHORT,
+    MA_WEEKLY_LONG,
+    RSI_PERIOD,
+    MACD_FAST_PERIOD,
+    MACD_SLOW_PERIOD,
+    MACD_SIGNAL_PERIOD,
+    ATR_PERIOD,
+    BOLLINGER_PERIOD,
+    BOLLINGER_STD_DEV,
+    CHART_HISTORY_YEARS,
+    CHART_HISTORY_DAYS,
+    CHART_WIDTH,
+    CHART_HEIGHT,
+    CHART_SCALE,
+    VOLUME_AVERAGE_DAYS,
+    DATE_FORMAT_FILE,
+    CLAUDE_MODEL,
+)
+
+# Import utilities
+from utils import (
+    setup_logging,
+    validate_symbol,
+    ensure_directory,
+)
+
+# Set up logging
+logger = setup_logging(__name__)
+
 
 # ============================================================================
 # Peer Lookup Helper Functions
 # ============================================================================
 
-def get_peers_finnhub(symbol):
+def get_peers_finnhub(symbol: str) -> Tuple[bool, Dict[str, List], Optional[str]]:
     """
     Get peer companies using Finnhub API.
+
+    Fetches peer company data using Finnhub's GICS sub-industry classification
+    and enriches it with current market data from yfinance.
 
     Args:
         symbol: Stock ticker symbol
 
     Returns:
-        tuple: (success: bool, peers_data: dict, error: str)
+        A tuple containing:
+            - success (bool): True if peer data was successfully retrieved
+            - peers_data (dict): Dictionary with keys 'symbol', 'name', 'price', 'market_cap'
+            - error (str or None): Error message if failed, None otherwise
+
+    Example:
+        >>> success, peers, error = get_peers_finnhub('AAPL')
+        >>> if success:
+        ...     print(f"Found {len(peers['symbol'])} peers")
     """
+    import os
+
     try:
         import finnhub
 
@@ -75,17 +125,18 @@ def get_peers_finnhub(symbol):
         if not peer_symbols:
             return False, {}, "Finnhub returned no peers"
 
+        logger.info(f"Found {len(peer_symbols)} potential peers from Finnhub: {', '.join(peer_symbols[:5])}...")
         print(f"  Found {len(peer_symbols)} potential peers from Finnhub: {', '.join(peer_symbols[:5])}...")
 
         # Enrich with yfinance data
-        peers_data = {
+        peers_data: Dict[str, List] = {
             'symbol': [],
             'name': [],
             'price': [],
             'market_cap': []
         }
 
-        for peer in peer_symbols[:15]:  # Limit to top 15
+        for peer in peer_symbols[:MAX_PEERS_TO_FETCH]:
             try:
                 ticker = yf.Ticker(peer)
                 info = ticker.info
@@ -96,13 +147,18 @@ def get_peers_finnhub(symbol):
                 peers_data['price'].append(float(price) if price else 0.0)
                 peers_data['market_cap'].append(info.get('marketCap', 0))
 
-            except Exception as e:
+            except (KeyError, ValueError, AttributeError) as e:
+                logger.debug(f"Could not fetch data for {peer}: {e}")
                 print(f"  ⚠ Could not fetch data for {peer}: {e}")
+                continue
+            except Exception as e:
+                logger.warning(f"Unexpected error fetching {peer}: {e}")
                 continue
 
         if not peers_data['symbol']:
             return False, {}, "Could not enrich any peers with market data"
 
+        logger.info(f"Enriched {len(peers_data['symbol'])} peers with market data")
         print(f"  ✓ Enriched {len(peers_data['symbol'])} peers with market data")
         return True, peers_data, None
 
@@ -112,11 +168,13 @@ def get_peers_finnhub(symbol):
         error_msg = str(e)
         # Check for rate limit
         if '429' in error_msg or 'rate limit' in error_msg.lower():
+            logger.error(f"Finnhub rate limit exceeded: {error_msg}")
             return False, {}, f"Finnhub rate limit exceeded: {error_msg}"
+        logger.error(f"Finnhub error: {error_msg}", exc_info=True)
         return False, {}, f"Finnhub error: {error_msg}"
 
 
-def get_peers_openbb(symbol):
+def get_peers_openbb(symbol: str) -> Tuple[bool, Dict, Optional[str]]:
     """
     Get peer companies using OpenBB/FMP.
 
@@ -124,8 +182,18 @@ def get_peers_openbb(symbol):
         symbol: Stock ticker symbol
 
     Returns:
-        tuple: (success: bool, peers_data: dict, error: str)
+        A tuple containing:
+            - success (bool): True if peer data was successfully retrieved
+            - peers_data (dict): Peer company data dictionary
+            - error (str or None): Error message if failed, None otherwise
+
+    Example:
+        >>> success, peers, error = get_peers_openbb('TSLA')
+        >>> if success:
+        ...     print("OpenBB peers retrieved")
     """
+    import os
+
     try:
         pat = os.getenv('OPENBB_PAT')
         if not pat:
@@ -135,6 +203,7 @@ def get_peers_openbb(symbol):
         try:
             obb.user.credentials.openbb_pat = pat
         except Exception as e:
+            logger.error(f"Could not login with PAT: {e}")
             return False, {}, f"Could not login with PAT: {e}"
 
         # Get peers using FMP provider
@@ -144,6 +213,7 @@ def get_peers_openbb(symbol):
         if not peers_data:
             return False, {}, "OpenBB/FMP returned empty results"
 
+        logger.info("OpenBB/FMP returned peers")
         print(f"  ✓ OpenBB/FMP returned peers")
         return True, peers_data, None
 
@@ -153,46 +223,64 @@ def get_peers_openbb(symbol):
         error_msg = str(e)
         # Check if it's a subscription issue
         if 'subscription' in error_msg.lower() or 'plan' in error_msg.lower():
+            logger.warning(f"FMP peers endpoint requires paid subscription: {error_msg}")
             return False, {}, f"FMP peers endpoint requires paid subscription: {error_msg}"
+        logger.error(f"OpenBB/FMP error: {error_msg}", exc_info=True)
         return False, {}, f"OpenBB/FMP error: {error_msg}"
 
 
-def get_peers_with_fallback(symbol):
+def get_peers_with_fallback(symbol: str) -> Tuple[Dict[str, List], str, Dict[str, Optional[str]]]:
     """
-    Get peer companies with automatic fallback chain:
-    Finnhub -> OpenBB+FMP
+    Get peer companies with automatic fallback chain.
+
+    Tries multiple providers in sequence: Finnhub -> OpenBB+FMP
 
     Args:
         symbol: Stock ticker symbol
 
     Returns:
-        tuple: (peers_data: dict, provider_used: str, all_errors: dict)
+        A tuple containing:
+            - peers_data (dict): Dictionary with peer data (keys: symbol, name, price, market_cap)
+            - provider_used (str): Name of successful provider ('Finnhub', 'OpenBB+FMP', or 'none')
+            - all_errors (dict): Dictionary mapping provider names to error messages
+
+    Example:
+        >>> peers, provider, errors = get_peers_with_fallback('AAPL')
+        >>> if provider != 'none':
+        ...     print(f"Found peers using {provider}")
     """
-    all_errors = {}
+    all_errors: Dict[str, Optional[str]] = {}
 
     # Try Finnhub first
+    logger.info("[1/2] Trying Finnhub for peer detection...")
     print(f"[1/2] Trying Finnhub for peer detection...")
     success, peers_data, error = get_peers_finnhub(symbol)
     all_errors['finnhub'] = error
 
     if success and peers_data:
+        logger.info("Finnhub succeeded")
         print(f"✓ Finnhub succeeded")
         return peers_data, 'Finnhub', all_errors
     else:
+        logger.info(f"Finnhub failed: {error}")
         print(f"✗ Finnhub failed: {error}")
 
     # Try OpenBB+FMP second
+    logger.info("[2/2] Trying OpenBB+FMP for peer detection...")
     print(f"[2/2] Trying OpenBB+FMP for peer detection...")
     success, peers_data, error = get_peers_openbb(symbol)
     all_errors['openbb'] = error
 
     if success and peers_data:
+        logger.info("OpenBB+FMP succeeded")
         print(f"✓ OpenBB+FMP succeeded")
         return peers_data, 'OpenBB+FMP', all_errors
     else:
+        logger.info(f"OpenBB+FMP failed: {error}")
         print(f"✗ OpenBB+FMP failed: {error}")
 
     # All providers failed
+    logger.warning("All peer providers failed")
     return {'symbol': [], 'name': [], 'price': [], 'market_cap': []}, 'none', all_errors
 
 
@@ -200,25 +288,36 @@ def get_peers_with_fallback(symbol):
 # Chart and Technical Analysis Functions
 # ============================================================================
 
-def save_chart(symbol, work_dir):
+def save_chart(symbol: str, work_dir: Path) -> bool:
     """
-    Generate and save stock chart.
+    Generate and save stock chart with technical indicators.
+
+    Creates a multi-panel chart showing:
+    - Candlestick price chart with moving averages
+    - Volume overlay
+    - Relative strength vs S&P 500
 
     Args:
         symbol: Stock ticker symbol
         work_dir: Work directory path
 
     Returns:
-        bool: True if successful, False otherwise
+        True if chart was successfully generated and saved, False otherwise
+
+    Example:
+        >>> from pathlib import Path
+        >>> success = save_chart('AAPL', Path('work/AAPL_20260116'))
     """
     try:
+        logger.info(f"Generating stock chart for {symbol}...")
         print(f"Generating stock chart for {symbol}...")
 
         # Download weekly data
-        symbol_df = yf.download(symbol, interval="1wk", period="4y", progress=False)
-        spx_df = yf.download("^GSPC", interval="1wk", period="4y", progress=False)
+        symbol_df = yf.download(symbol, interval="1wk", period=f"{CHART_HISTORY_YEARS}y", progress=False)
+        spx_df = yf.download("^GSPC", interval="1wk", period=f"{CHART_HISTORY_YEARS}y", progress=False)
 
         if symbol_df.empty:
+            logger.error(f"No data available for {symbol}")
             print(f"❌ No data available for {symbol}")
             return False
 
@@ -229,8 +328,8 @@ def save_chart(symbol, work_dir):
             spx_df.columns = spx_df.columns.get_level_values(0)
 
         # Compute moving averages
-        symbol_df['MA13'] = symbol_df['Close'].rolling(window=13).mean()
-        symbol_df['MA52'] = symbol_df['Close'].rolling(window=52).mean()
+        symbol_df['MA13'] = symbol_df['Close'].rolling(window=MA_WEEKLY_SHORT).mean()
+        symbol_df['MA52'] = symbol_df['Close'].rolling(window=MA_WEEKLY_LONG).mean()
 
         # Compute relative strength vs SPX
         relative = (symbol_df['Close'] / spx_df['Close']).values
@@ -295,8 +394,8 @@ def save_chart(symbol, work_dir):
         fig.update_layout(
             title=f'{symbol} - Weekly Chart',
             xaxis_rangeslider_visible=False,
-            height=600,
-            width=800,
+            height=CHART_HEIGHT,
+            width=CHART_WIDTH,
             showlegend=True
         )
 
@@ -305,40 +404,57 @@ def save_chart(symbol, work_dir):
         fig.update_yaxes(title_text="Relative Strength", row=2, col=1)
 
         # Save chart
-        output_dir = os.path.join(work_dir, '01_technical')
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = Path(work_dir) / '01_technical'
+        ensure_directory(output_dir)
 
-        chart_path = os.path.join(output_dir, 'chart.png')
-        fig.write_image(chart_path, scale=2)
+        chart_path = output_dir / 'chart.png'
+        fig.write_image(str(chart_path), scale=CHART_SCALE)
 
+        logger.info(f"Saved chart to: {chart_path}")
         print(f"✓ Saved chart to: {chart_path}")
         return True
 
-    except Exception as e:
+    except (ValueError, KeyError, AttributeError) as e:
+        logger.error(f"Error generating chart: {e}", exc_info=True)
         print(f"❌ Error generating chart: {e}")
-        import traceback
-        traceback.print_exc()
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error generating chart: {e}", exc_info=True)
+        print(f"❌ Error generating chart: {e}")
         return False
 
 
-def save_technical_analysis(symbol, work_dir):
+def save_technical_analysis(symbol: str, work_dir: Path) -> bool:
     """
     Generate and save technical analysis indicators.
+
+    Calculates and saves various technical indicators including:
+    - Simple Moving Averages (20, 50, 200 day)
+    - RSI (Relative Strength Index)
+    - MACD (Moving Average Convergence Divergence)
+    - ATR (Average True Range)
+    - Bollinger Bands
 
     Args:
         symbol: Stock ticker symbol
         work_dir: Work directory path
 
     Returns:
-        bool: True if successful, False otherwise
+        True if analysis was successful, False otherwise
+
+    Example:
+        >>> from pathlib import Path
+        >>> success = save_technical_analysis('TSLA', Path('work/TSLA_20260116'))
     """
     try:
+        logger.info(f"Running technical analysis for {symbol}...")
         print(f"Running technical analysis for {symbol}...")
 
         # Download daily data for technical indicators
-        df = yf.download(symbol, period="1y", progress=False)
+        df = yf.download(symbol, period=f"{CHART_HISTORY_DAYS}d", progress=False)
 
         if df.empty:
+            logger.error(f"No data available for {symbol}")
             print(f"❌ No data available for {symbol}")
             return False
 
@@ -354,27 +470,27 @@ def save_technical_analysis(symbol, work_dir):
         volume = np.array(df['Volume'].values, dtype=np.float64).flatten()
 
         # Moving averages
-        sma_20 = talib.SMA(close, timeperiod=20)
-        sma_50 = talib.SMA(close, timeperiod=50)
-        sma_200 = talib.SMA(close, timeperiod=200)
+        sma_20 = talib.SMA(close, timeperiod=SMA_SHORT_PERIOD)
+        sma_50 = talib.SMA(close, timeperiod=SMA_MEDIUM_PERIOD)
+        sma_200 = talib.SMA(close, timeperiod=SMA_LONG_PERIOD)
 
-        # RSI (14-period)
-        rsi = talib.RSI(close, timeperiod=14)
+        # RSI
+        rsi = talib.RSI(close, timeperiod=RSI_PERIOD)
 
-        # MACD (12, 26, 9)
+        # MACD
         macd, macd_signal, macd_hist = talib.MACD(close,
-                                                    fastperiod=12,
-                                                    slowperiod=26,
-                                                    signalperiod=9)
+                                                    fastperiod=MACD_FAST_PERIOD,
+                                                    slowperiod=MACD_SLOW_PERIOD,
+                                                    signalperiod=MACD_SIGNAL_PERIOD)
 
-        # ATR (14-period)
-        atr = talib.ATR(high, low, close, timeperiod=14)
+        # ATR
+        atr = talib.ATR(high, low, close, timeperiod=ATR_PERIOD)
 
-        # Bollinger Bands (optional - for additional context)
+        # Bollinger Bands
         bb_upper, bb_middle, bb_lower = talib.BBANDS(close,
-                                                       timeperiod=20,
-                                                       nbdevup=2,
-                                                       nbdevdn=2,
+                                                       timeperiod=BOLLINGER_PERIOD,
+                                                       nbdevup=BOLLINGER_STD_DEV,
+                                                       nbdevdn=BOLLINGER_STD_DEV,
                                                        matype=0)
 
         # Get latest values - convert immediately to floats
@@ -421,8 +537,8 @@ Average Volume (20D): {vol_val:,.0f}
 """
 
         # Save as JSON
-        output_dir = os.path.join(work_dir, '01_technical')
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = Path(work_dir) / '01_technical'
+        ensure_directory(output_dir)
 
         analysis_data = {
             'symbol': symbol,
@@ -453,10 +569,11 @@ Average Volume (20D): {vol_val:,.0f}
             'analysis': analysis_text.strip()
         }
 
-        analysis_path = os.path.join(output_dir, 'technical_analysis.json')
-        with open(analysis_path, 'w') as f:
+        analysis_path = output_dir / 'technical_analysis.json'
+        with analysis_path.open('w') as f:
             json.dump(analysis_data, f, indent=2)
 
+        logger.info(f"Saved technical analysis to: {analysis_path}")
         print(f"✓ Saved technical analysis to: {analysis_path}")
 
         # Print the analysis
@@ -467,16 +584,27 @@ Average Volume (20D): {vol_val:,.0f}
 
         return True
 
-    except Exception as e:
+    except (ValueError, KeyError, AttributeError) as e:
+        logger.error(f"Error in technical analysis: {e}", exc_info=True)
         print(f"❌ Error in technical analysis: {e}")
-        import traceback
-        traceback.print_exc()
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error in technical analysis: {e}", exc_info=True)
+        print(f"❌ Error in technical analysis: {e}")
         return False
 
 
-def filter_peers_by_industry(symbol, company_name, industry, peers_data):
+def filter_peers_by_industry(
+    symbol: str,
+    company_name: str,
+    industry: str,
+    peers_data: Dict[str, List]
+) -> Tuple[Optional[Dict[str, List]], Optional[str]]:
     """
     Use Claude API to filter peers to only true industry peers.
+
+    Leverages Claude's reasoning to identify companies that are actual industry
+    peers versus unrelated companies that may be returned by basic classification.
 
     Args:
         symbol: Target company ticker
@@ -485,8 +613,16 @@ def filter_peers_by_industry(symbol, company_name, industry, peers_data):
         peers_data: Dictionary with 'symbol' and 'name' lists
 
     Returns:
-        tuple: (filtered_peers_data, rationale_text) or (None, None) on error
+        A tuple containing:
+            - filtered_peers_data (dict or None): Filtered peer data, None if filtering failed
+            - rationale_text (str or None): Explanation of filtering decisions, None if failed
+
+    Example:
+        >>> peers = {'symbol': ['AAPL', 'MSFT'], 'name': ['Apple', 'Microsoft']}
+        >>> filtered, rationale = filter_peers_by_industry('AAPL', 'Apple Inc.', 'Technology', peers)
     """
+    import os
+
     try:
         # Import Anthropic here to avoid loading if not needed
         from anthropic import Anthropic
@@ -543,6 +679,7 @@ You must evaluate ALL {len(peers_data['symbol'])} companies from the list."""
         # Call Claude API with structured output
         api_key = os.environ.get('ANTHROPIC_API_KEY')
         if not api_key:
+            logger.warning("ANTHROPIC_API_KEY not set, skipping peer filtering")
             print("⚠ Warning: ANTHROPIC_API_KEY not set, skipping peer filtering")
             return None, None
 
@@ -550,7 +687,7 @@ You must evaluate ALL {len(peers_data['symbol'])} companies from the list."""
 
         try:
             response = client.messages.create(
-                model="claude-sonnet-4-5-20250929",
+                model=CLAUDE_MODEL,
                 max_tokens=4000,
                 messages=[{
                     "role": "user",
@@ -572,9 +709,10 @@ You must evaluate ALL {len(peers_data['symbol'])} companies from the list."""
             )
         except TypeError:
             # Fallback if response_format not supported in this SDK version
+            logger.info("Using prompt-based JSON (SDK doesn't support response_format)")
             print("  Note: Using prompt-based JSON (SDK doesn't support response_format)")
             response = client.messages.create(
-                model="claude-sonnet-4-5-20250929",
+                model=CLAUDE_MODEL,
                 max_tokens=4000,
                 system="You are a financial analyst. Respond ONLY with valid JSON matching the requested schema. Do not include any explanatory text, markdown formatting, or code blocks.",
                 messages=[{
@@ -641,16 +779,27 @@ You must evaluate ALL {len(peers_data['symbol'])} companies from the list."""
 
         return filtered_peers, rationale_text
 
-    except Exception as e:
+    except (KeyError, ValueError, json.JSONDecodeError) as e:
+        logger.warning(f"Could not filter peers: {e}")
         print(f"⚠ Warning: Could not filter peers: {e}")
-        import traceback
-        traceback.print_exc()
+        return None, None
+    except Exception as e:
+        logger.error(f"Unexpected error filtering peers: {e}", exc_info=True)
+        print(f"⚠ Warning: Could not filter peers: {e}")
         return None, None
 
 
-def save_peers_list(symbol, work_dir, custom_peers=None, filter_peers=True):
+def save_peers_list(
+    symbol: str,
+    work_dir: Path,
+    custom_peers: Optional[str] = None,
+    filter_peers: bool = True
+) -> bool:
     """
     Get and save peer companies list.
+
+    Either uses custom peers provided by user or auto-detects peers using
+    multiple data providers. Optionally filters peers using Claude API.
 
     Args:
         symbol: Stock ticker symbol
@@ -659,9 +808,16 @@ def save_peers_list(symbol, work_dir, custom_peers=None, filter_peers=True):
         filter_peers: If True, use Claude API to filter peers by industry
 
     Returns:
-        bool: True if successful, False otherwise
+        True if successful, False otherwise
+
+    Example:
+        >>> from pathlib import Path
+        >>> success = save_peers_list('TSLA', Path('work/TSLA_20260116'))
     """
+    import os
+
     try:
+        logger.info(f"Getting peer companies for {symbol}...")
         print(f"Getting peer companies for {symbol}...")
 
         if custom_peers:
@@ -721,13 +877,14 @@ def save_peers_list(symbol, work_dir, custom_peers=None, filter_peers=True):
                 print(f"\n✓ Successfully detected peers using {provider_used}\n")
 
         # Save to file (same for both paths)
-        output_dir = os.path.join(work_dir, '01_technical')
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = Path(work_dir) / '01_technical'
+        ensure_directory(output_dir)
 
-        peers_path = os.path.join(output_dir, 'peers_list.json')
-        with open(peers_path, 'w') as f:
+        peers_path = output_dir / 'peers_list.json'
+        with peers_path.open('w') as f:
             json.dump(peers_data, f, indent=2)
 
+        logger.info(f"Saved peers list to: {peers_path}")
         print(f"✓ Saved peers list to: {peers_path}")
 
         # Print peer symbols
@@ -742,12 +899,13 @@ def save_peers_list(symbol, work_dir, custom_peers=None, filter_peers=True):
 
         # Apply peer filtering if requested
         if filter_peers:
+            logger.info("Filtering peers using Claude API...")
             print(f"\nFiltering peers using Claude API...")
 
             # Need company overview for industry classification
-            overview_path = os.path.join(work_dir, '02_fundamental', 'company_overview.json')
-            if os.path.exists(overview_path):
-                with open(overview_path, 'r') as f:
+            overview_path = Path(work_dir) / '02_fundamental' / 'company_overview.json'
+            if overview_path.exists():
+                with overview_path.open('r') as f:
                     overview = json.load(f)
 
                 company_name = overview.get('company_name', symbol)
@@ -763,14 +921,16 @@ def save_peers_list(symbol, work_dir, custom_peers=None, filter_peers=True):
 
                 if filtered_peers:
                     # Save raw peers as backup
-                    raw_peers_path = os.path.join(output_dir, 'peers_list_raw.json')
-                    with open(raw_peers_path, 'w') as f:
+                    raw_peers_path = output_dir / 'peers_list_raw.json'
+                    with raw_peers_path.open('w') as f:
                         json.dump(peers_data, f, indent=2)
+                    logger.info(f"Saved raw peers to: {raw_peers_path}")
                     print(f"✓ Saved raw peers to: {raw_peers_path}")
 
                     # Replace with filtered peers
-                    with open(peers_path, 'w') as f:
+                    with peers_path.open('w') as f:
                         json.dump(filtered_peers, f, indent=2)
+                    logger.info(f"Saved filtered peers to: {peers_path}")
                     print(f"✓ Saved filtered peers to: {peers_path}")
 
                     # Print rationale
@@ -792,15 +952,23 @@ def save_peers_list(symbol, work_dir, custom_peers=None, filter_peers=True):
 
         return True
 
-    except Exception as e:
+    except (KeyError, ValueError, json.JSONDecodeError) as e:
+        logger.error(f"Error getting peers: {e}", exc_info=True)
         print(f"❌ Error getting peers: {e}")
-        import traceback
-        traceback.print_exc()
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error getting peers: {e}", exc_info=True)
+        print(f"❌ Error getting peers: {e}")
         return False
 
 
-def main():
-    """Main execution function."""
+def main() -> int:
+    """
+    Main execution function.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
     parser = argparse.ArgumentParser(
         description='Technical analysis research phase'
     )
@@ -827,17 +995,17 @@ def main():
     args = parser.parse_args()
 
     # Normalize symbol
-    symbol = args.symbol.upper()
+    symbol = validate_symbol(args.symbol)
 
     # Generate work directory if not specified
     if not args.work_dir:
-        date_str = datetime.now().strftime('%Y%m%d')
-        work_dir = os.path.join('work', f'{symbol}_{date_str}')
+        date_str = datetime.now().strftime(DATE_FORMAT_FILE)
+        work_dir = Path('work') / f'{symbol}_{date_str}'
     else:
-        work_dir = args.work_dir
+        work_dir = Path(args.work_dir)
 
     # Create work directory if it doesn't exist
-    os.makedirs(work_dir, exist_ok=True)
+    ensure_directory(work_dir)
 
     print("=" * 60)
     print("Technical Analysis Phase")

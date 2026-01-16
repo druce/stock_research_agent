@@ -1,4 +1,4 @@
-#!/opt/anaconda3/envs/mcpskills/bin/python3
+#!/usr/bin/env python3
 """
 Stock Research Orchestrator
 
@@ -16,54 +16,68 @@ Output:
     - Tracks completed phases in metadata file
 """
 
-import os
 import sys
 import argparse
 import json
 import subprocess
-import glob
 import shutil
+import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Set
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import Manager
-
-# Load environment variables from .env
 from dotenv import load_dotenv
+
+# Import configuration
+from config import (
+    WORK_DIR,
+    PHASE_API_KEYS,
+    PHASE_TIMEOUTS,
+    MAX_PARALLEL_WORKERS,
+    DATE_FORMAT_FILE,
+    DATE_FORMAT_DISPLAY,
+)
+
+# Import utilities
+from utils import (
+    setup_logging,
+    validate_symbol,
+    ensure_directory,
+    format_date,
+)
+
+# Set up logging
+logger = setup_logging(__name__)
+
+# Load environment variables
 load_dotenv()
 
 # Import company overview function for early execution
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, str(Path(__file__).parent))
 from research_fundamental import save_company_overview
 
-# Constants
-WORK_DIR = 'work'
 
-# Define required API keys for each phase
-PHASE_API_KEYS = {
-    'technical': ['OPENBB_PAT'],
-    'fundamental': ['OPENBB_PAT'],
-    'research': ['PERPLEXITY_API_KEY'],
-    'analysis': ['PERPLEXITY_API_KEY'],
-    'sec': ['SEC_FIRM', 'SEC_USER'],  # SEC requires company name and email
-    'wikipedia': [],  # No API key needed
-    'report': [],  # No API key needed
-    'deep': ['ANTHROPIC_API_KEY'],
-    'final': []  # No API key needed
-}
-
-
-def validate_api_keys(phases_to_run):
+def validate_api_keys(phases_to_run: List[str]) -> Tuple[bool, List[str]]:
     """
     Validate that required API keys are present for the phases to run.
 
     Args:
-        phases_to_run: List of phase names
+        phases_to_run: List of phase names to execute
 
     Returns:
-        tuple: (success: bool, missing_keys: list)
+        Tuple containing:
+            - success: True if all required keys present
+            - missing_keys: Sorted list of missing API key names
+
+    Example:
+        >>> valid, missing = validate_api_keys(['technical', 'research'])
+        >>> if not valid:
+        ...     print(f"Missing: {missing}")
     """
-    missing_keys = set()
+    import os
+
+    missing_keys: Set[str] = set()
 
     for phase in phases_to_run:
         required_keys = PHASE_API_KEYS.get(phase, [])
@@ -74,57 +88,60 @@ def validate_api_keys(phases_to_run):
     return len(missing_keys) == 0, sorted(missing_keys)
 
 
-def validate_ticker(symbol):
+def validate_ticker(symbol: str) -> bool:
     """
-    Validate ticker symbol using lookup_ticker.py.
+    Validate ticker symbol using lookup_ticker skill.
+
+    Uses the lookup_ticker.py skill to verify that the symbol exists
+    and is valid. If validation fails due to network issues, continues
+    with a warning.
 
     Args:
-        symbol: Ticker symbol to validate
+        symbol: Stock ticker symbol to validate (e.g., 'TSLA', 'AAPL')
 
     Returns:
-        bool: True if valid, False otherwise
+        True if valid ticker, False otherwise
+
+    Example:
+        >>> if validate_ticker('AAPL'):
+        ...     print("Valid ticker")
     """
     try:
-        # Use lookup_ticker to search for the symbol
+        lookup_script = Path(__file__).parent / 'lookup_ticker.py'
         result = subprocess.run(
-            [os.path.join(os.path.dirname(__file__), 'lookup_ticker.py'), symbol, '--limit', '1'],
+            [str(lookup_script), symbol, '--limit', '1'],
             capture_output=True,
             text=True,
             timeout=30
         )
 
-        # If lookup_ticker found results, ticker is valid
-        if result.returncode == 0 and 'SUCCESS' in result.stdout:
+        if result.returncode == 0:
             return True
-        else:
-            return False
+
+        logger.warning(
+            "Ticker validation failed (exit %s). stdout: %s stderr: %s",
+            result.returncode,
+            result.stdout.strip(),
+            result.stderr.strip()
+        )
+        return False
+
+    except subprocess.TimeoutExpired:
+        logger.warning("Ticker validation timed out after 30 seconds")
+        return True
+    except FileNotFoundError as e:
+        logger.warning(f"Could not find lookup_ticker.py: {e}")
+        return True
     except Exception as e:
-        print(f"Warning: Could not validate ticker: {e}")
-        # If validation fails, continue anyway (might be network issue)
+        logger.warning(f"Could not validate ticker: {e}")
         return True
 
 
-def create_work_directory(symbol):
-    """
-    Create work directory for research outputs.
-
-    Args:
-        symbol: Stock ticker symbol
-
-    Returns:
-        str: Path to work directory
-    """
-    date_str = datetime.now().strftime('%Y%m%d')
-    work_dir = os.path.join(WORK_DIR, f"{symbol}_{date_str}")
-
-    # Create main work directory
-    os.makedirs(work_dir, exist_ok=True)
-
-    print(f"✓ Created work directory: {work_dir}")
-    return work_dir
-
-
-def cleanup_old_directories(symbol, current_dir, skip_cleanup=False):
+def cleanup_old_directories(
+    symbol: str,
+    current_dir: Path,
+    skip_cleanup: bool = False
+) -> None:
     """
     Delete older work directories for the same symbol.
 
@@ -132,25 +149,30 @@ def cleanup_old_directories(symbol, current_dir, skip_cleanup=False):
         symbol: Stock ticker symbol
         current_dir: Current work directory to preserve
         skip_cleanup: If True, skip cleanup
+
+    Example:
+        >>> cleanup_old_directories('TSLA', Path('work/TSLA_20260116'))
     """
     if skip_cleanup:
         print(f"⊘ Skipping cleanup (--skip-cleanup flag set)")
         return
 
-    # Find all work directories for this symbol
-    pattern = os.path.join(WORK_DIR, f"{symbol}_*")
-    matching_dirs = glob.glob(pattern)
+    work_dir_path = Path(WORK_DIR)
+    if not work_dir_path.exists():
+        return
+
+    pattern = f"{symbol}_*"
+    matching_dirs = list(work_dir_path.glob(pattern))
 
     deleted_count = 0
     for dir_path in matching_dirs:
-        # Don't delete current directory
-        if dir_path != current_dir:
+        if dir_path != current_dir and dir_path.is_dir():
             try:
                 shutil.rmtree(dir_path)
                 deleted_count += 1
                 print(f"✓ Deleted old directory: {dir_path}")
-            except Exception as e:
-                print(f"Warning: Could not delete {dir_path}: {e}")
+            except OSError as e:
+                logger.warning(f"Could not delete {dir_path}: {e}")
 
     if deleted_count == 0:
         print(f"✓ No old directories to clean up")
@@ -158,7 +180,7 @@ def cleanup_old_directories(symbol, current_dir, skip_cleanup=False):
         print(f"✓ Cleaned up {deleted_count} old director{'y' if deleted_count == 1 else 'ies'}")
 
 
-def create_metadata(work_dir, symbol):
+def create_metadata(work_dir: Path, symbol: str) -> Dict:
     """
     Create metadata file to track research progress.
 
@@ -167,7 +189,12 @@ def create_metadata(work_dir, symbol):
         symbol: Stock ticker symbol
 
     Returns:
-        dict: Metadata dictionary
+        Metadata dictionary with tracking information
+
+    Example:
+        >>> metadata = create_metadata(Path('work/TSLA_20260116'), 'TSLA')
+        >>> print(metadata['symbol'])
+        TSLA
     """
     metadata = {
         'symbol': symbol,
@@ -179,58 +206,82 @@ def create_metadata(work_dir, symbol):
         'data_sources': {}
     }
 
-    # Save metadata
-    metadata_path = os.path.join(work_dir, '00_metadata.json')
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
+    metadata_path = work_dir / '00_metadata.json'
+    try:
+        with metadata_path.open('w') as f:
+            json.dump(metadata, f, indent=2)
+        print(f"✓ Created metadata file: {metadata_path}")
+    except IOError as e:
+        logger.error(f"Failed to create metadata file: {e}")
+        raise
 
-    print(f"✓ Created metadata file: {metadata_path}")
     return metadata
 
 
-def save_metadata(work_dir, metadata):
+def save_metadata(work_dir: Path, metadata: Dict) -> None:
     """
     Save updated metadata to file.
 
     Args:
         work_dir: Work directory path
         metadata: Metadata dictionary to save
+
+    Example:
+        >>> save_metadata(work_dir, metadata)
     """
-    metadata_path = os.path.join(work_dir, '00_metadata.json')
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f, indent=2)
+    metadata_path = work_dir / '00_metadata.json'
+    try:
+        with metadata_path.open('w') as f:
+            json.dump(metadata, f, indent=2)
+    except IOError as e:
+        logger.error(f"Failed to save metadata: {e}")
 
 
-def run_phase(phase_name, phase_script, symbol, work_dir, metadata, metadata_lock=None, extra_args=None):
+def run_phase(
+    phase_name: str,
+    phase_script: Path,
+    symbol: str,
+    work_dir: Path,
+    metadata: Dict,
+    metadata_lock: Optional[object] = None,
+    extra_args: Optional[List[str]] = None
+) -> bool:
     """
     Execute a research phase script.
 
     Args:
-        phase_name: Name of the phase (e.g., 'technical')
-        phase_script: Path to phase script
+        phase_name: Name of the phase (e.g., 'technical', 'fundamental')
+        phase_script: Path to phase script file
         symbol: Stock ticker symbol
         work_dir: Work directory path
-        metadata: Metadata dictionary
+        metadata: Metadata dictionary for tracking
         metadata_lock: Threading lock for metadata updates (optional)
         extra_args: List of extra command-line arguments (optional)
 
     Returns:
-        bool: True if phase succeeded, False otherwise
+        True if phase succeeded, False otherwise
+
+    Example:
+        >>> success = run_phase(
+        ...     'technical',
+        ...     Path('skills/research_technical.py'),
+        ...     'TSLA',
+        ...     Path('work/TSLA_20260116'),
+        ...     metadata
+        ... )
     """
     print(f"\n{'='*60}")
     print(f"Phase: {phase_name.upper()}")
     print(f"{'='*60}")
 
     try:
-        # Build command with optional extra args
-        cmd = [phase_script, symbol, '--work-dir', work_dir]
+        cmd = [str(phase_script), symbol, '--work-dir', str(work_dir)]
         if extra_args:
             cmd.extend(extra_args)
 
-        # Execute phase script with appropriate timeout
-        # Deep research needs more time due to extended thinking and MCP tools
-        phase_timeout = 1800 if phase_name == 'deep' else 300  # 30 min for deep, 5 min for others
+        phase_timeout = PHASE_TIMEOUTS.get(phase_name, 300)
 
+        logger.debug(f"Executing command: {' '.join(cmd)}")
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -238,47 +289,44 @@ def run_phase(phase_name, phase_script, symbol, work_dir, metadata, metadata_loc
             timeout=phase_timeout
         )
 
-        # Print script output
         if result.stdout:
             print(result.stdout)
 
-        # Thread-safe metadata update
-        if metadata_lock:
-            with metadata_lock:
-                if result.returncode == 0:
-                    metadata['phases_completed'].append(phase_name)
-                    print(f"\n✓ Phase '{phase_name}' completed successfully")
-                    save_metadata(work_dir, metadata)
-                    return True
-                else:
-                    error_msg = f"Phase '{phase_name}' failed with return code {result.returncode}"
-                    if result.stderr:
-                        error_msg += f": {result.stderr}"
-                    metadata['phases_failed'].append(phase_name)
-                    metadata['errors'].append(error_msg)
-                    print(f"\n❌ {error_msg}")
-                    save_metadata(work_dir, metadata)
-                    return False
-        else:
-            # Non-parallel execution (backward compatible)
-            if result.returncode == 0:
-                metadata['phases_completed'].append(phase_name)
-                print(f"\n✓ Phase '{phase_name}' completed successfully")
-                save_metadata(work_dir, metadata)
-                return True
+        def update_metadata_success():
+            metadata['phases_completed'].append(phase_name)
+            print(f"\n✓ Phase '{phase_name}' completed successfully")
+            save_metadata(work_dir, metadata)
+
+        def update_metadata_failure(error_msg: str):
+            metadata['phases_failed'].append(phase_name)
+            metadata['errors'].append(error_msg)
+            print(f"\n❌ {error_msg}")
+            save_metadata(work_dir, metadata)
+
+        if result.returncode == 0:
+            if metadata_lock:
+                with metadata_lock:
+                    update_metadata_success()
             else:
-                error_msg = f"Phase '{phase_name}' failed with return code {result.returncode}"
-                if result.stderr:
-                    error_msg += f": {result.stderr}"
-                metadata['phases_failed'].append(phase_name)
-                metadata['errors'].append(error_msg)
-                print(f"\n❌ {error_msg}")
-                save_metadata(work_dir, metadata)
-                return False
+                update_metadata_success()
+            return True
+        else:
+            error_msg = f"Phase '{phase_name}' failed with return code {result.returncode}"
+            if result.stderr:
+                error_msg += f": {result.stderr}"
+
+            if metadata_lock:
+                with metadata_lock:
+                    update_metadata_failure(error_msg)
+            else:
+                update_metadata_failure(error_msg)
+            return False
 
     except subprocess.TimeoutExpired:
         timeout_minutes = phase_timeout // 60
         error_msg = f"Phase '{phase_name}' timed out after {timeout_minutes} minutes"
+        logger.error(error_msg)
+
         if metadata_lock:
             with metadata_lock:
                 metadata['phases_failed'].append(phase_name)
@@ -293,6 +341,8 @@ def run_phase(phase_name, phase_script, symbol, work_dir, metadata, metadata_loc
 
     except FileNotFoundError:
         error_msg = f"Phase script not found: {phase_script}"
+        logger.error(error_msg)
+
         if metadata_lock:
             with metadata_lock:
                 metadata['phases_failed'].append(phase_name)
@@ -307,6 +357,8 @@ def run_phase(phase_name, phase_script, symbol, work_dir, metadata, metadata_loc
 
     except Exception as e:
         error_msg = f"Phase '{phase_name}' encountered unexpected error: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+
         if metadata_lock:
             with metadata_lock:
                 metadata['phases_failed'].append(phase_name)
@@ -320,8 +372,13 @@ def run_phase(phase_name, phase_script, symbol, work_dir, metadata, metadata_loc
         return False
 
 
-def main():
-    """Main execution function."""
+def main() -> int:
+    """
+    Main execution function.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
     parser = argparse.ArgumentParser(
         description='Comprehensive stock research orchestrator'
     )
@@ -350,18 +407,25 @@ def main():
         action='store_true',
         help='Disable automatic peer filtering (filtering is enabled by default)'
     )
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose logging'
+    )
 
     args = parser.parse_args()
 
-    # Normalize symbol to uppercase
-    symbol = args.symbol.upper()
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    symbol = validate_symbol(args.symbol)
 
     print("=" * 60)
     print("Stock Research Orchestrator")
     print("=" * 60)
     print(f"Symbol: {symbol}")
     print(f"Phases: {args.phases}")
-    print(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Date: {format_date(datetime.now(), DATE_FORMAT_DISPLAY)}")
     print("=" * 60)
 
     # Step 1: Validate ticker
@@ -381,31 +445,31 @@ def main():
     print("Step 2: Work Directory Setup")
     print(f"{'='*60}")
 
-    # Determine work directory path
-    date_str = datetime.now().strftime('%Y%m%d')
-    work_dir = os.path.join(WORK_DIR, f"{symbol}_{date_str}")
+    date_str = datetime.now().strftime(DATE_FORMAT_FILE)
+    work_dir = Path(WORK_DIR) / f"{symbol}_{date_str}"
 
     # Step 3: Cleanup old directories BEFORE creating new one
     cleanup_old_directories(symbol, work_dir, args.skip_cleanup)
 
     # Create new work directory
-    os.makedirs(work_dir, exist_ok=True)
+    ensure_directory(work_dir)
     print(f"✓ Created work directory: {work_dir}")
 
     # Step 4: Create metadata
     metadata = create_metadata(work_dir, symbol)
 
     # Step 5: Determine which phases to run
-    all_phases = {
-        'technical': 'skills/research_technical.py',
-        'fundamental': 'skills/research_fundamental.py',
-        'research': 'skills/research_perplexity.py',
-        'analysis': 'skills/research_analysis.py',
-        'sec': 'skills/research_sec.py',
-        'wikipedia': 'skills/research_wikipedia.py',
-        'report': 'skills/research_report.py',
-        'deep': 'skills/research_deep.py',
-        'final': 'skills/research_final.py'
+    skills_dir = Path(__file__).parent
+    all_phases: Dict[str, Path] = {
+        'technical': skills_dir / 'research_technical.py',
+        'fundamental': skills_dir / 'research_fundamental.py',
+        'research': skills_dir / 'research_perplexity.py',
+        'analysis': skills_dir / 'research_analysis.py',
+        'sec': skills_dir / 'research_sec.py',
+        'wikipedia': skills_dir / 'research_wikipedia.py',
+        'report': skills_dir / 'research_report.py',
+        'deep': skills_dir / 'research_deep.py',
+        'final': skills_dir / 'research_final.py'
     }
 
     if args.phases.lower() == 'all':
@@ -441,25 +505,23 @@ def main():
     print(f"\n{'='*60}")
     print("Step 4: Get Company Overview")
     print(f"{'='*60}")
-    print(f"Fetching foundational company data for {symbol}...")
+    logger.info(f"Fetching foundational company data for {symbol}...")
 
     # Run company overview first (quick, foundational data)
     if save_company_overview(symbol, work_dir):
         print(f"✓ Company overview data ready")
     else:
-        print(f"⚠ Warning: Could not fetch company overview, continuing with other phases...")
+        logger.warning("Could not fetch company overview, continuing with other phases...")
 
     print(f"\n{'='*60}")
     print("Step 5: Execute Research Phases")
     print(f"{'='*60}")
     print(f"Phases to run: {', '.join(phases_to_run)}")
 
-    # Execute phases with dependencies
     success_count = 0
     failed_count = 0
 
     # Separate phases into groups for sequential execution
-    # IMPORTANT: Technical phase MUST run first (generates peers list needed by fundamental)
     technical_phase = 'technical' in phases_to_run
     other_data_phases = [p for p in phases_to_run if p not in ['technical', 'report', 'deep', 'final']]
     report_phase = 'report' in phases_to_run
@@ -473,8 +535,7 @@ def main():
         print(f"{'='*60}")
 
         phase_script = all_phases['technical']
-        if os.path.exists(phase_script):
-            # Add --peers and --no-filter-peers arguments for technical phase if specified
+        if phase_script.exists():
             extra_args = []
             if args.peers:
                 extra_args.extend(['--peers', args.peers])
@@ -486,9 +547,9 @@ def main():
                 success_count += 1
             else:
                 failed_count += 1
-                print(f"\n⚠️  Warning: Technical phase failed - fundamental phase may have incomplete peer data")
+                logger.warning("Technical phase failed - fundamental phase may have incomplete peer data")
         else:
-            print(f"\n⊘ Skipping 'technical' - script not yet implemented")
+            logger.info("Skipping 'technical' - script not yet implemented")
 
     # Execute remaining data phases in parallel (if any)
     if other_data_phases:
@@ -497,26 +558,21 @@ def main():
         print(f"(Technical phase already completed - peer list available)")
         print(f"{'='*60}")
 
-        # Create a multiprocessing-compatible lock
         manager = Manager()
         metadata_lock = manager.Lock()
 
-        with ProcessPoolExecutor(max_workers=6) as executor:
-            # Submit all remaining data phase tasks
+        with ProcessPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
             future_to_phase = {}
             for phase_name in other_data_phases:
                 phase_script = all_phases[phase_name]
 
-                # Check if phase script exists
-                if not os.path.exists(phase_script):
-                    print(f"\n⊘ Skipping '{phase_name}' - script not yet implemented")
+                if not phase_script.exists():
+                    logger.info(f"Skipping '{phase_name}' - script not yet implemented")
                     continue
 
-                # No extra args for other phases
                 future = executor.submit(run_phase, phase_name, phase_script, symbol, work_dir, metadata, metadata_lock, [])
                 future_to_phase[future] = phase_name
 
-            # Collect results as they complete
             for future in as_completed(future_to_phase):
                 phase_name = future_to_phase[future]
                 try:
@@ -526,13 +582,13 @@ def main():
                     else:
                         failed_count += 1
                 except Exception as e:
-                    print(f"\n❌ Unexpected error in parallel execution for '{phase_name}': {e}")
+                    logger.error(f"Unexpected error in parallel execution for '{phase_name}': {e}", exc_info=True)
                     failed_count += 1
 
     # Execute report phase sequentially (after all data gathered)
     if report_phase:
         phase_script = all_phases['report']
-        if os.path.exists(phase_script):
+        if phase_script.exists():
             print(f"\n{'='*60}")
             print("Generating initial research report...")
             print(f"{'='*60}")
@@ -542,12 +598,12 @@ def main():
             else:
                 failed_count += 1
         else:
-            print(f"\n⊘ Skipping 'report' - script not yet implemented")
+            logger.info("Skipping 'report' - script not yet implemented")
 
     # Execute deep research phase sequentially (after report)
     if deep_phase:
         phase_script = all_phases['deep']
-        if os.path.exists(phase_script):
+        if phase_script.exists():
             print(f"\n{'='*60}")
             print("Running deep research with Claude API...")
             print("This may take a few minutes with extended thinking enabled...")
@@ -558,12 +614,12 @@ def main():
             else:
                 failed_count += 1
         else:
-            print(f"\n⊘ Skipping 'deep' - script not yet implemented")
+            logger.info("Skipping 'deep' - script not yet implemented")
 
     # Execute final report phase sequentially (after deep)
     if final_phase:
         phase_script = all_phases['final']
-        if os.path.exists(phase_script):
+        if phase_script.exists():
             print(f"\n{'='*60}")
             print("Assembling final report with multi-format conversion...")
             print(f"{'='*60}")
@@ -573,14 +629,14 @@ def main():
             else:
                 failed_count += 1
         else:
-            print(f"\n⊘ Skipping 'final' - script not yet implemented")
+            logger.info("Skipping 'final' - script not yet implemented")
 
     # Step 6: Final summary
     print(f"\n{'='*60}")
     print("Research Complete")
     print(f"{'='*60}")
     print(f"Symbol: {symbol}")
-    print(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Completed at: {format_date(datetime.now(), DATE_FORMAT_DISPLAY)}")
     print(f"Work directory: {work_dir}")
     print(f"Phases completed: {success_count}")
     print(f"Phases failed: {failed_count}")
@@ -595,7 +651,6 @@ def main():
 
     print(f"\n{'='*60}")
 
-    # Return success if at least one phase completed
     if success_count > 0:
         print("✓ Research partially or fully completed")
         print(f"✓ See outputs in: {work_dir}")

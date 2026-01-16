@@ -1,4 +1,4 @@
-#!/opt/anaconda3/envs/mcpskills/bin/python3
+#!/usr/bin/env python3
 """
 SEC Filings Research Phase
 
@@ -19,13 +19,15 @@ Output:
     - 10k_metadata.json - Filing metadata
 """
 
-import os
 import sys
 import argparse
 import json
 import re
+import shutil
+import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, Tuple
 
 # Load environment
 from dotenv import load_dotenv
@@ -37,19 +39,46 @@ from sec_edgar_downloader import Downloader
 # For parsing HTML
 from bs4 import BeautifulSoup
 
+# Import configuration
+from config import (
+    SEC_FILING_TYPE,
+    SEC_ITEM1_MAX_LENGTH,
+    DATE_FORMAT_FILE,
+)
 
-def fetch_10k_item1(symbol, work_dir):
+# Import utilities
+from utils import (
+    setup_logging,
+    validate_symbol,
+    ensure_directory,
+)
+
+# Set up logging
+logger = setup_logging(__name__)
+
+
+def fetch_10k_item1(symbol: str, work_dir: Path) -> bool:
     """
     Fetch Item 1 (Business) from the latest 10-K filing.
+
+    Downloads the latest 10-K filing from SEC EDGAR and extracts Item 1
+    (Business Description section).
 
     Args:
         symbol: Stock ticker symbol
         work_dir: Work directory path
 
     Returns:
-        bool: True if successful, False otherwise
+        True if successful, False otherwise
+
+    Example:
+        >>> from pathlib import Path
+        >>> success = fetch_10k_item1('AAPL', Path('work/AAPL_20260116'))
     """
+    import os
+
     try:
+        logger.info(f"Downloading 10-K filing for {symbol}...")
         print(f"Downloading 10-K filing for {symbol}...")
 
         # Get SEC credentials from environment
@@ -57,60 +86,62 @@ def fetch_10k_item1(symbol, work_dir):
         sec_user = os.getenv('SEC_USER')
 
         if not sec_firm or not sec_user:
+            logger.error("SEC_FIRM and SEC_USER must be set in .env file")
             print(f"❌ ERROR: SEC_FIRM and SEC_USER must be set in .env file")
             print(f"   SEC requires User-Agent with company name and email")
             return False
 
-        output_dir = os.path.join(work_dir, '05_sec')
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = work_dir / '05_sec'
+        ensure_directory(output_dir)
 
         # Create temporary download directory
-        temp_dir = os.path.join(output_dir, 'temp_download')
-        os.makedirs(temp_dir, exist_ok=True)
+        temp_dir = output_dir / 'temp_download'
+        ensure_directory(temp_dir)
 
         # Initialize downloader with company name and email from environment
         # SEC requires User-Agent with contact info
-        dl = Downloader(sec_firm, sec_user, temp_dir)
+        dl = Downloader(sec_firm, sec_user, str(temp_dir))
 
         # Download the latest 10-K
+        logger.info("Fetching latest 10-K from SEC EDGAR...")
         print(f"  Fetching latest 10-K from SEC EDGAR...")
-        dl.get("10-K", symbol, limit=1)
+        dl.get(SEC_FILING_TYPE, symbol, limit=1)
 
         # Find the downloaded file
+        logger.info("Parsing 10-K filing...")
         print(f"  Parsing 10-K filing...")
         filing_path = None
-        for root, dirs, files in os.walk(temp_dir):
-            for file in files:
-                if file.endswith('.txt'):
-                    filing_path = os.path.join(root, file)
-                    break
-            if filing_path:
-                break
+        for path in temp_dir.rglob('*.txt'):
+            filing_path = path
+            break
 
         if not filing_path:
+            logger.error("Could not find downloaded 10-K filing")
             print(f"❌ Could not find downloaded 10-K filing")
             return False
 
         # Read the filing
-        with open(filing_path, 'r', encoding='utf-8', errors='ignore') as f:
+        with filing_path.open('r', encoding='utf-8', errors='ignore') as f:
             filing_text = f.read()
 
         # Extract Item 1
         item1_text = extract_item1(filing_text)
 
         if not item1_text:
+            logger.warning("Could not automatically extract Item 1, saving truncated filing")
             print(f"⚠ Could not automatically extract Item 1, saving full filing")
-            item1_text = filing_text[:50000]  # First 50K characters
+            item1_text = filing_text[:SEC_ITEM1_MAX_LENGTH]
 
         # Save Item 1
-        item1_path = os.path.join(output_dir, '10k_item1.txt')
-        with open(item1_path, 'w', encoding='utf-8') as f:
+        item1_path = output_dir / '10k_item1.txt'
+        with item1_path.open('w', encoding='utf-8') as f:
             f.write(f"SEC 10-K Filing - Item 1 (Business)\n")
             f.write(f"Symbol: {symbol}\n")
             f.write(f"Downloaded: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"=" * 60 + "\n\n")
             f.write(item1_text)
 
+        logger.info(f"Saved Item 1 to: {item1_path} ({len(item1_text):,} characters)")
         print(f"✓ Saved Item 1 to: {item1_path}")
         print(f"  Length: {len(item1_text):,} characters")
 
@@ -118,39 +149,50 @@ def fetch_10k_item1(symbol, work_dir):
         metadata = {
             'symbol': symbol,
             'timestamp': datetime.now().isoformat(),
-            'filing_type': '10-K',
-            'filing_path': filing_path,
+            'filing_type': SEC_FILING_TYPE,
+            'filing_path': str(filing_path),
             'item1_length': len(item1_text),
         }
 
-        metadata_path = os.path.join(output_dir, '10k_metadata.json')
-        with open(metadata_path, 'w') as f:
+        metadata_path = output_dir / '10k_metadata.json'
+        with metadata_path.open('w') as f:
             json.dump(metadata, f, indent=2)
 
+        logger.info(f"Saved metadata to: {metadata_path}")
         print(f"✓ Saved metadata to: {metadata_path}")
 
         # Clean up temp directory
-        import shutil
         shutil.rmtree(temp_dir)
 
         return True
 
-    except Exception as e:
+    except (IOError, OSError) as e:
+        logger.error(f"File error downloading 10-K: {e}", exc_info=True)
         print(f"❌ Error downloading 10-K: {e}")
-        import traceback
-        traceback.print_exc()
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error downloading 10-K: {e}", exc_info=True)
+        print(f"❌ Error downloading 10-K: {e}")
         return False
 
 
-def extract_item1(filing_text):
+def extract_item1(filing_text: str) -> Optional[str]:
     """
     Extract Item 1 (Business) section from 10-K filing text.
+
+    Uses regex patterns to identify and extract the Business section from
+    the HTML/text content of a 10-K filing.
 
     Args:
         filing_text: Full text of the 10-K filing
 
     Returns:
-        str: Item 1 text or None if not found
+        Item 1 text if found, None otherwise
+
+    Example:
+        >>> text = extract_item1(filing_content)
+        >>> if text:
+        ...     print(f"Found {len(text)} characters")
     """
     try:
         # First, parse HTML and extract clean text
@@ -184,10 +226,12 @@ def extract_item1(filing_text):
             match = re.search(pattern, clean_text)
             if match:
                 start_pos = match.start()
+                logger.info(f"Found Item 1 at position {start_pos}")
                 print(f"  Found Item 1 at position {start_pos}")
                 break
 
         if not start_pos:
+            logger.warning("Could not find Item 1 header")
             print(f"  Warning: Could not find Item 1 header")
             return None
 
@@ -230,18 +274,27 @@ def extract_item1(filing_text):
         # Final whitespace cleanup
         item1_text = re.sub(r'\n\s*\n\s*\n+', '\n\n', item1_text)
 
+        logger.info(f"Extracted {len(item1_text):,} characters")
         print(f"  Extracted {len(item1_text):,} characters")
         return item1_text.strip()
 
-    except Exception as e:
+    except (AttributeError, ValueError) as e:
+        logger.warning(f"Error extracting Item 1: {e}")
         print(f"  Warning: Error extracting Item 1: {e}")
-        import traceback
-        traceback.print_exc()
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error extracting Item 1: {e}", exc_info=True)
+        print(f"  Warning: Error extracting Item 1: {e}")
         return None
 
 
-def main():
-    """Main execution function."""
+def main() -> int:
+    """
+    Main execution function.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
     parser = argparse.ArgumentParser(
         description='SEC filings research phase'
     )
@@ -258,17 +311,17 @@ def main():
     args = parser.parse_args()
 
     # Normalize symbol
-    symbol = args.symbol.upper()
+    symbol = validate_symbol(args.symbol)
 
     # Generate work directory if not specified
     if not args.work_dir:
-        date_str = datetime.now().strftime('%Y%m%d')
-        work_dir = os.path.join('work', f'{symbol}_{date_str}')
+        date_str = datetime.now().strftime(DATE_FORMAT_FILE)
+        work_dir = Path('work') / f'{symbol}_{date_str}'
     else:
-        work_dir = args.work_dir
+        work_dir = Path(args.work_dir)
 
     # Create work directory if it doesn't exist
-    os.makedirs(work_dir, exist_ok=True)
+    ensure_directory(work_dir)
 
     print("=" * 60)
     print("SEC Filings Research Phase")

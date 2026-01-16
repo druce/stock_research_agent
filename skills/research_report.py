@@ -1,4 +1,4 @@
-#!/opt/anaconda3/envs/mcpskills/bin/python3
+#!/usr/bin/env python3
 """
 Report Generation Phase
 
@@ -18,30 +18,60 @@ Output:
     - research_report.html - HTML report (optional)
 """
 
-import os
 import sys
+import os
 import argparse
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional, Any
 import pandas as pd
 
 # Template engine
 from jinja2 import Environment, FileSystemLoader
 
+# Import configuration
+from config import (
+    TEMPLATES_DIR,
+    DEFAULT_REPORT_TEMPLATE,
+    DATE_FORMAT_FILE,
+)
 
-def load_data(work_dir, symbol):
+# Import utilities
+from utils import (
+    setup_logging,
+    validate_symbol,
+    ensure_directory,
+    format_currency,
+    format_number,
+    format_percentage,
+)
+
+# Set up logging
+logger = setup_logging(__name__)
+
+
+def load_data(work_dir: Path, symbol: str) -> Dict[str, Any]:
     """
     Load all research data from phase outputs.
+
+    Aggregates data from technical analysis, fundamental analysis, research,
+    SEC filings, and other phases into a single dictionary for template rendering.
 
     Args:
         work_dir: Work directory path
         symbol: Stock ticker symbol
 
     Returns:
-        dict: Dictionary containing all research data
+        Dictionary containing all research data with standardized keys
+
+    Example:
+        >>> from pathlib import Path
+        >>> data = load_data(Path('work/TSLA_20260116'), 'TSLA')
+        >>> print(data['company_name'])
     """
-    data = {
+    data: Dict[str, Any] = {
         'symbol': symbol,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'company_name': 'N/A',
@@ -52,40 +82,53 @@ def load_data(work_dir, symbol):
     }
 
     # Load metadata (optional - symbol already set from parameter)
-    metadata_path = os.path.join(work_dir, '00_metadata.json')
-    if os.path.exists(metadata_path):
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-            # Metadata can override if present, but not required
-            if metadata.get('symbol'):
-                data['symbol'] = metadata.get('symbol')
+    metadata_path = work_dir / '00_metadata.json'
+    if metadata_path.exists():
+        try:
+            with metadata_path.open('r') as f:
+                metadata = json.load(f)
+                # Metadata can override if present, but not required
+                if metadata.get('symbol'):
+                    data['symbol'] = metadata.get('symbol')
+        except (IOError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load metadata: {e}")
 
     # Load technical analysis
-    tech_path = os.path.join(work_dir, '01_technical/technical_analysis.json')
-    if os.path.exists(tech_path):
-        with open(tech_path, 'r') as f:
-            data['technical_analysis'] = json.load(f)
-            if 'latest_price' in data['technical_analysis']:
-                data['latest_price'] = f"{data['technical_analysis']['latest_price']:.2f}"
+    tech_path = work_dir / '01_technical' / 'technical_analysis.json'
+    if tech_path.exists():
+        try:
+            with tech_path.open('r') as f:
+                data['technical_analysis'] = json.load(f)
+                if 'latest_price' in data['technical_analysis']:
+                    data['latest_price'] = f"{data['technical_analysis']['latest_price']:.2f}"
+        except (IOError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load technical analysis: {e}")
 
     # Load peers list with enhanced metrics
-    peers_path = os.path.join(work_dir, '01_technical/peers_list.json')
-    ratios_path = os.path.join(work_dir, '02_fundamental/key_ratios.csv')
+    peers_path = work_dir / '01_technical' / 'peers_list.json'
+    ratios_path = work_dir / '02_fundamental' / 'key_ratios.csv'
 
-    if os.path.exists(peers_path):
-        with open(peers_path, 'r') as f:
-            peers_data = json.load(f)
+    if peers_path.exists():
+        try:
+            with peers_path.open('r') as f:
+                peers_data = json.load(f)
+        except (IOError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load peers data: {e}")
+            peers_data = None
 
         # Load key ratios for peer metrics
         ratios_df = None
-        if os.path.exists(ratios_path):
-            ratios_df = pd.read_csv(ratios_path)
+        if ratios_path.exists():
+            try:
+                ratios_df = pd.read_csv(ratios_path)
+            except (IOError, pd.errors.ParserError) as e:
+                logger.warning(f"Could not load ratios data: {e}")
 
         # Convert to list of dicts with enhanced metrics
-        if 'symbol' in peers_data and isinstance(peers_data['symbol'], list):
-            peers = []
+        if peers_data and 'symbol' in peers_data and isinstance(peers_data['symbol'], list):
+            peers: List[Dict[str, Any]] = []
             for i, peer_symbol in enumerate(peers_data['symbol']):
-                peer_info = {
+                peer_info: Dict[str, Any] = {
                     'symbol': peer_symbol,
                     'name': peers_data.get('name', [])[i] if i < len(peers_data.get('name', [])) else 'N/A',
                     'price': f"{peers_data.get('price', [])[i]:.2f}" if i < len(peers_data.get('price', [])) and peers_data.get('price', [])[i] else 'N/A',
@@ -109,7 +152,8 @@ def load_data(work_dir, symbol):
                         if pd.notna(rev_val) and rev_val != 'N/A':
                             try:
                                 peer_info['revenue'] = f"${float(rev_val)/1e9:.1f}B"
-                            except:
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"Could not format revenue for {peer_symbol}: {e}")
                                 peer_info['revenue'] = 'N/A'
                         else:
                             peer_info['revenue'] = 'N/A'
@@ -123,7 +167,8 @@ def load_data(work_dir, symbol):
                         if pd.notna(margin_val) and margin_val != 'N/A':
                             try:
                                 peer_info['profit_margin'] = f"{float(margin_val)*100:.1f}%"
-                            except:
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"Could not format profit margin for {peer_symbol}: {e}")
                                 peer_info['profit_margin'] = 'N/A'
                         else:
                             peer_info['profit_margin'] = 'N/A'
@@ -137,7 +182,8 @@ def load_data(work_dir, symbol):
                         if pd.notna(roe_val) and roe_val != 'N/A':
                             try:
                                 peer_info['roe'] = f"{float(roe_val)*100:.1f}%"
-                            except:
+                            except (ValueError, TypeError) as e:
+                                logger.debug(f"Could not format ROE for {peer_symbol}: {e}")
                                 peer_info['roe'] = 'N/A'
                         else:
                             peer_info['roe'] = 'N/A'
@@ -155,24 +201,27 @@ def load_data(work_dir, symbol):
             data['peers'] = peers[:10]  # Limit to top 10
 
     # Check for chart
-    chart_path = os.path.join(work_dir, '01_technical/chart.png')
-    if os.path.exists(chart_path):
+    chart_path = work_dir / '01_technical' / 'chart.png'
+    if chart_path.exists():
         data['chart_path'] = '01_technical/chart.png'
 
     # Check for income statement Sankey chart
-    sankey_path = os.path.join(work_dir, '02_fundamental/income_statement_sankey.png')
-    if os.path.exists(sankey_path):
+    sankey_path = work_dir / '02_fundamental' / 'income_statement_sankey.png'
+    if sankey_path.exists():
         data['income_statement_sankey_path'] = '02_fundamental/income_statement_sankey.png'
 
     # Load fundamental data
-    overview_path = os.path.join(work_dir, '02_fundamental/company_overview.json')
-    if os.path.exists(overview_path):
-        with open(overview_path, 'r') as f:
-            overview = json.load(f)
-            data['company_name'] = overview.get('company_name', 'N/A')
-            data['sector'] = overview.get('sector', 'N/A')
-            data['industry'] = overview.get('industry', 'N/A')
-            data['business_summary'] = overview.get('business_summary', '')
+    overview_path = work_dir / '02_fundamental' / 'company_overview.json'
+    if overview_path.exists():
+        try:
+            with overview_path.open('r') as f:
+                overview = json.load(f)
+                data['company_name'] = overview.get('company_name', 'N/A')
+                data['sector'] = overview.get('sector', 'N/A')
+                data['industry'] = overview.get('industry', 'N/A')
+                data['business_summary'] = overview.get('business_summary', '')
+        except (IOError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load company overview: {e}")
 
             if overview.get('market_cap') != 'N/A':
                 data['market_cap'] = f"{overview['market_cap']:,.0f}"
@@ -207,150 +256,196 @@ def load_data(work_dir, symbol):
             data['price_to_sales'] = f"{overview.get('price_to_sales', 0):.2f}" if overview.get('price_to_sales') != 'N/A' else 'N/A'
 
     # Load analyst recommendations
-    recs_path = os.path.join(work_dir, '02_fundamental/analyst_recommendations.json')
-    if os.path.exists(recs_path):
-        with open(recs_path, 'r') as f:
-            recs = json.load(f)
-            # Convert to DataFrame-like format for template
-            data['analyst_recommendations'] = recs
+    recs_path = work_dir / '02_fundamental' / 'analyst_recommendations.json'
+    if recs_path.exists():
+        try:
+            with recs_path.open('r') as f:
+                recs = json.load(f)
+                # Convert to DataFrame-like format for template
+                data['analyst_recommendations'] = recs
+        except (IOError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load analyst recommendations: {e}")
 
     # Load Perplexity research
-    news_path = os.path.join(work_dir, '03_research/news_stories.md')
-    if os.path.exists(news_path):
-        with open(news_path, 'r') as f:
-            data['news_stories'] = f.read()
+    news_path = work_dir / '03_research' / 'news_stories.md'
+    if news_path.exists():
+        try:
+            with news_path.open('r') as f:
+                data['news_stories'] = f.read()
+        except IOError as e:
+            logger.warning(f"Could not load news stories: {e}")
 
-    business_profile_path = os.path.join(work_dir, '03_research/business_profile.md')
-    if os.path.exists(business_profile_path):
-        with open(business_profile_path, 'r') as f:
-            data['business_profile'] = f.read()
+    business_profile_path = work_dir / '03_research' / 'business_profile.md'
+    if business_profile_path.exists():
+        try:
+            with business_profile_path.open('r') as f:
+                data['business_profile'] = f.read()
+        except IOError as e:
+            logger.warning(f"Could not load business profile: {e}")
 
-    exec_profiles_path = os.path.join(work_dir, '03_research/executive_profiles.md')
-    if os.path.exists(exec_profiles_path):
-        with open(exec_profiles_path, 'r') as f:
-            data['executive_profiles'] = f.read()
+    exec_profiles_path = work_dir / '03_research' / 'executive_profiles.md'
+    if exec_profiles_path.exists():
+        try:
+            with exec_profiles_path.open('r') as f:
+                data['executive_profiles'] = f.read()
+        except IOError as e:
+            logger.warning(f"Could not load executive profiles: {e}")
 
     # Load SEC data
-    sec_metadata_path = os.path.join(work_dir, '04_sec/10k_metadata.json')
-    if os.path.exists(sec_metadata_path):
-        with open(sec_metadata_path, 'r') as f:
-            sec_data = json.load(f)
-            data['sec_filing_url'] = sec_data.get('filing_url', '')
-            data['sec_filing_date'] = sec_data.get('filing_date', '')
-            data['sec_report_date'] = sec_data.get('report_date', '')
+    sec_metadata_path = work_dir / '04_sec' / '10k_metadata.json'
+    if sec_metadata_path.exists():
+        try:
+            with sec_metadata_path.open('r') as f:
+                sec_data = json.load(f)
+                data['sec_filing_url'] = sec_data.get('filing_url', '')
+                data['sec_filing_date'] = sec_data.get('filing_date', '')
+                data['sec_report_date'] = sec_data.get('report_date', '')
+        except (IOError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load SEC metadata: {e}")
 
     # Load Wikipedia data
-    wiki_summary_path = os.path.join(work_dir, '05_wikipedia/wikipedia_summary.txt')
-    if os.path.exists(wiki_summary_path):
-        with open(wiki_summary_path, 'r') as f:
-            wiki_text = f.read()
-            # Extract just the summary part (after the header)
-            lines = wiki_text.split('\n')
-            summary_start = False
-            summary_lines = []
-            for line in lines:
-                if '=' * 60 in line:
-                    if summary_start:
-                        break
-                    summary_start = True
-                    continue
-                if summary_start and line.strip():
-                    summary_lines.append(line)
-            data['wikipedia_summary'] = '\n'.join(summary_lines)
+    wiki_summary_path = work_dir / '05_wikipedia' / 'wikipedia_summary.txt'
+    if wiki_summary_path.exists():
+        try:
+            with wiki_summary_path.open('r') as f:
+                wiki_text = f.read()
+                # Extract just the summary part (after the header)
+                lines = wiki_text.split('\n')
+                summary_start = False
+                summary_lines = []
+                for line in lines:
+                    if '=' * 60 in line:
+                        if summary_start:
+                            break
+                        summary_start = True
+                        continue
+                    if summary_start and line.strip():
+                        summary_lines.append(line)
+                data['wikipedia_summary'] = '\n'.join(summary_lines)
+        except IOError as e:
+            logger.warning(f"Could not load Wikipedia summary: {e}")
 
     # Load deep analysis data
-    analysis_dir = os.path.join(work_dir, '06_analysis')
+    analysis_dir = work_dir / '06_analysis'
 
     # Business model analysis
-    business_model_path = os.path.join(analysis_dir, 'business_model_analysis.md')
-    if os.path.exists(business_model_path):
-        with open(business_model_path, 'r') as f:
-            data['business_model_analysis'] = f.read()
+    business_model_path = analysis_dir / 'business_model_analysis.md'
+    if business_model_path.exists():
+        try:
+            with business_model_path.open('r') as f:
+                data['business_model_analysis'] = f.read()
+        except IOError as e:
+            logger.warning(f"Could not load business model analysis: {e}")
 
     # Competitive analysis
-    competitive_path = os.path.join(analysis_dir, 'competitive_analysis.md')
-    if os.path.exists(competitive_path):
-        with open(competitive_path, 'r') as f:
-            data['competitive_analysis'] = f.read()
+    competitive_path = analysis_dir / 'competitive_analysis.md'
+    if competitive_path.exists():
+        try:
+            with competitive_path.open('r') as f:
+                data['competitive_analysis'] = f.read()
+        except IOError as e:
+            logger.warning(f"Could not load competitive analysis: {e}")
 
     # Supply chain analysis
-    supply_chain_path = os.path.join(analysis_dir, 'supply_chain_analysis.md')
-    if os.path.exists(supply_chain_path):
-        with open(supply_chain_path, 'r') as f:
-            data['supply_chain_analysis'] = f.read()
+    supply_chain_path = analysis_dir / 'supply_chain_analysis.md'
+    if supply_chain_path.exists():
+        try:
+            with supply_chain_path.open('r') as f:
+                data['supply_chain_analysis'] = f.read()
+        except IOError as e:
+            logger.warning(f"Could not load supply chain analysis: {e}")
 
     # Risk analysis
-    risk_analysis_path = os.path.join(analysis_dir, 'risk_analysis.md')
-    if os.path.exists(risk_analysis_path):
-        with open(risk_analysis_path, 'r') as f:
-            data['recent_news_analysis'] = f.read()
+    risk_analysis_path = analysis_dir / 'risk_analysis.md'
+    if risk_analysis_path.exists():
+        try:
+            with risk_analysis_path.open('r') as f:
+                data['recent_news_analysis'] = f.read()
+        except IOError as e:
+            logger.warning(f"Could not load risk analysis: {e}")
 
     # Investment thesis
-    thesis_path = os.path.join(analysis_dir, 'investment_thesis.md')
-    if os.path.exists(thesis_path):
-        with open(thesis_path, 'r') as f:
-            thesis_content = f.read()
-            data['investment_thesis'] = thesis_content
+    thesis_path = analysis_dir / 'investment_thesis.md'
+    if thesis_path.exists():
+        try:
+            with thesis_path.open('r') as f:
+                thesis_content = f.read()
+                data['investment_thesis'] = thesis_content
+        except IOError as e:
+            logger.warning(f"Could not load investment thesis: {e}")
+            thesis_content = None
 
             # Try to extract specific sections from investment thesis
             # This is a simple approach - could be enhanced with better parsing
-            if 'Bull Case' in thesis_content or 'bull case' in thesis_content.lower():
-                # Extract bull case section
+            if thesis_content:
                 import re
-                bull_match = re.search(r'(?:Bull Case|BULL CASE)[\s\S]*?(?=(?:Bear Case|BEAR CASE|Base Case|##|$))', thesis_content, re.IGNORECASE)
-                if bull_match:
-                    data['bull_case'] = bull_match.group(0).strip()
+                if 'Bull Case' in thesis_content or 'bull case' in thesis_content.lower():
+                    # Extract bull case section
+                    bull_match = re.search(r'(?:Bull Case|BULL CASE)[\s\S]*?(?=(?:Bear Case|BEAR CASE|Base Case|##|$))', thesis_content, re.IGNORECASE)
+                    if bull_match:
+                        data['bull_case'] = bull_match.group(0).strip()
 
-            if 'Bear Case' in thesis_content or 'bear case' in thesis_content.lower():
-                # Extract bear case section
-                bear_match = re.search(r'(?:Bear Case|BEAR CASE)[\s\S]*?(?=(?:Base Case|BASE CASE|Critical Watch|##|$))', thesis_content, re.IGNORECASE)
-                if bear_match:
-                    data['bear_case'] = bear_match.group(0).strip()
+                if 'Bear Case' in thesis_content or 'bear case' in thesis_content.lower():
+                    # Extract bear case section
+                    bear_match = re.search(r'(?:Bear Case|BEAR CASE)[\s\S]*?(?=(?:Base Case|BASE CASE|Critical Watch|##|$))', thesis_content, re.IGNORECASE)
+                    if bear_match:
+                        data['bear_case'] = bear_match.group(0).strip()
 
-            if 'SWOT' in thesis_content:
-                # Extract SWOT sections
-                strengths_match = re.search(r'(?:Strengths|STRENGTHS)[\s\S]*?(?=(?:Weaknesses|WEAKNESSES|##))', thesis_content, re.IGNORECASE)
-                if strengths_match:
-                    data['strengths'] = strengths_match.group(0).strip()
+                if 'SWOT' in thesis_content:
+                    # Extract SWOT sections
+                    strengths_match = re.search(r'(?:Strengths|STRENGTHS)[\s\S]*?(?=(?:Weaknesses|WEAKNESSES|##))', thesis_content, re.IGNORECASE)
+                    if strengths_match:
+                        data['strengths'] = strengths_match.group(0).strip()
 
-                weaknesses_match = re.search(r'(?:Weaknesses|WEAKNESSES)[\s\S]*?(?=(?:Opportunities|OPPORTUNITIES|##))', thesis_content, re.IGNORECASE)
-                if weaknesses_match:
-                    data['weaknesses'] = weaknesses_match.group(0).strip()
+                    weaknesses_match = re.search(r'(?:Weaknesses|WEAKNESSES)[\s\S]*?(?=(?:Opportunities|OPPORTUNITIES|##))', thesis_content, re.IGNORECASE)
+                    if weaknesses_match:
+                        data['weaknesses'] = weaknesses_match.group(0).strip()
 
-                opportunities_match = re.search(r'(?:Opportunities|OPPORTUNITIES)[\s\S]*?(?=(?:Threats|THREATS|##))', thesis_content, re.IGNORECASE)
-                if opportunities_match:
-                    data['opportunities'] = opportunities_match.group(0).strip()
+                    opportunities_match = re.search(r'(?:Opportunities|OPPORTUNITIES)[\s\S]*?(?=(?:Threats|THREATS|##))', thesis_content, re.IGNORECASE)
+                    if opportunities_match:
+                        data['opportunities'] = opportunities_match.group(0).strip()
 
-                threats_match = re.search(r'(?:Threats|THREATS)[\s\S]*?(?=(?:Bull Case|BULL CASE|##|$))', thesis_content, re.IGNORECASE)
-                if threats_match:
-                    data['threats'] = threats_match.group(0).strip()
+                    threats_match = re.search(r'(?:Threats|THREATS)[\s\S]*?(?=(?:Bull Case|BULL CASE|##|$))', thesis_content, re.IGNORECASE)
+                    if threats_match:
+                        data['threats'] = threats_match.group(0).strip()
 
-    # Load SEC 10-K Item 1 excerpt (first 5000 chars for supply chain info)
-    item1_path = os.path.join(work_dir, '04_sec/10k_item1.txt')
-    if os.path.exists(item1_path):
-        with open(item1_path, 'r', encoding='utf-8', errors='ignore') as f:
-            item1_text = f.read()
-            # Extract a reasonable excerpt for business description
-            if len(item1_text) > 5000:
-                data['sec_item1_business'] = item1_text[:5000] + "\n\n[...continued in full 10-K filing]"
-            else:
-                data['sec_item1_business'] = item1_text
+    # Load SEC 10-K Item 1 excerpt
+    item1_path = work_dir / '04_sec' / '10k_item1.txt'
+    if item1_path.exists():
+        try:
+            with item1_path.open('r', encoding='utf-8', errors='ignore') as f:
+                item1_text = f.read()
+                # Extract a reasonable excerpt for business description
+                if len(item1_text) > 5000:
+                    data['sec_item1_business'] = item1_text[:5000] + "\n\n[...continued in full 10-K filing]"
+                else:
+                    data['sec_item1_business'] = item1_text
+        except IOError as e:
+            logger.warning(f"Could not load SEC Item 1: {e}")
 
     # Reference file paths for detailed analysis
-    balance_sheet_path = os.path.join(work_dir, '02_fundamental/balance_sheet.csv')
-    if os.path.exists(balance_sheet_path):
-        data['balance_sheet_file'] = balance_sheet_path
+    balance_sheet_path = work_dir / '02_fundamental' / 'balance_sheet.csv'
+    if balance_sheet_path.exists():
+        data['balance_sheet_file'] = str(balance_sheet_path)
 
-    cash_flow_path = os.path.join(work_dir, '02_fundamental/cash_flow.csv')
-    if os.path.exists(cash_flow_path):
-        data['cash_flow_file'] = cash_flow_path
+    cash_flow_path = work_dir / '02_fundamental' / 'cash_flow.csv'
+    if cash_flow_path.exists():
+        data['cash_flow_file'] = str(cash_flow_path)
 
     return data
 
 
-def generate_report(work_dir, symbol, output_format='markdown', template_name='equity_research_report.md.j2'):
+def generate_report(
+    work_dir: Path,
+    symbol: str,
+    output_format: str = 'markdown',
+    template_name: str = DEFAULT_REPORT_TEMPLATE
+) -> bool:
     """
     Generate the research report.
+
+    Loads all research data and renders it using a Jinja2 template to create
+    markdown and optionally HTML reports.
 
     Args:
         work_dir: Work directory path
@@ -359,9 +454,14 @@ def generate_report(work_dir, symbol, output_format='markdown', template_name='e
         template_name: Template file to use
 
     Returns:
-        bool: True if successful, False otherwise
+        True if report was successfully generated, False otherwise
+
+    Example:
+        >>> from pathlib import Path
+        >>> success = generate_report(Path('work/TSLA_20260116'), 'TSLA')
     """
     try:
+        logger.info(f"Generating {output_format} report...")
         print(f"Generating {output_format} report...")
         print(f"  Using template: {template_name}")
 
@@ -369,6 +469,7 @@ def generate_report(work_dir, symbol, output_format='markdown', template_name='e
         data = load_data(work_dir, symbol)
 
         if not data['symbol']:
+            logger.error("Could not determine symbol")
             print("❌ Could not determine symbol")
             return False
 
@@ -376,17 +477,13 @@ def generate_report(work_dir, symbol, output_format='markdown', template_name='e
         print(f"  Company: {data['company_name']}")
 
         # Set up Jinja2 environment
-        template_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
-        env = Environment(loader=FileSystemLoader(template_dir))
+        template_dir = Path(__file__).parent.parent / TEMPLATES_DIR
+        env = Environment(loader=FileSystemLoader(str(template_dir)))
 
         # Add custom filters for formatting
-        def format_number(value):
-            """Format large numbers with commas."""
-            try:
-                return f"{int(value):,}"
-            except:
-                return value
-        env.filters['format_number'] = format_number
+        env.filters['format_number'] = lambda value: format_number(value, precision=0)
+        env.filters['format_currency'] = format_currency
+        env.filters['format_percentage'] = format_percentage
 
         # Load template
         template = env.get_template(template_name)
@@ -395,10 +492,11 @@ def generate_report(work_dir, symbol, output_format='markdown', template_name='e
         report_content = template.render(**data)
 
         # Save markdown report
-        report_path = os.path.join(work_dir, 'research_report.md')
-        with open(report_path, 'w') as f:
+        report_path = work_dir / 'research_report.md'
+        with report_path.open('w') as f:
             f.write(report_content)
 
+        logger.info(f"Saved report to: {report_path}")
         print(f"✓ Saved report to: {report_path}")
 
         # Optionally convert to HTML
@@ -407,8 +505,8 @@ def generate_report(work_dir, symbol, output_format='markdown', template_name='e
                 import markdown
                 html_content = markdown.markdown(report_content)
 
-                html_path = os.path.join(work_dir, 'research_report.html')
-                with open(html_path, 'w') as f:
+                html_path = work_dir / 'research_report.html'
+                with html_path.open('w') as f:
                     f.write(f"""
 <!DOCTYPE html>
 <html>
@@ -431,21 +529,34 @@ def generate_report(work_dir, symbol, output_format='markdown', template_name='e
 </html>
 """)
 
+                logger.info(f"Saved HTML report to: {html_path}")
                 print(f"✓ Saved HTML report to: {html_path}")
             except ImportError:
+                logger.info("markdown library not installed, skipping HTML generation")
                 print("⊘ markdown library not installed, skipping HTML generation")
+            except IOError as e:
+                logger.error(f"Could not write HTML file: {e}")
+                print(f"⚠ Could not save HTML file: {e}")
 
         return True
 
-    except Exception as e:
+    except (IOError, KeyError) as e:
+        logger.error(f"Error generating report: {e}", exc_info=True)
         print(f"❌ Error generating report: {e}")
-        import traceback
-        traceback.print_exc()
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error generating report: {e}", exc_info=True)
+        print(f"❌ Error generating report: {e}")
         return False
 
 
-def main():
-    """Main execution function."""
+def main() -> int:
+    """
+    Main execution function.
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
     parser = argparse.ArgumentParser(
         description='Report generation phase'
     )
@@ -466,24 +577,24 @@ def main():
     )
     parser.add_argument(
         '--template',
-        default='equity_research_report.md.j2',
-        help='Template file to use (default: equity_research_report.md.j2)'
+        default=DEFAULT_REPORT_TEMPLATE,
+        help=f'Template file to use (default: {DEFAULT_REPORT_TEMPLATE})'
     )
 
     args = parser.parse_args()
 
     # Normalize symbol
-    symbol = args.symbol.upper()
+    symbol = validate_symbol(args.symbol)
 
     # Generate work directory if not specified
     if not args.work_dir:
-        date_str = datetime.now().strftime('%Y%m%d')
-        work_dir = os.path.join('work', f'{symbol}_{date_str}')
+        date_str = datetime.now().strftime(DATE_FORMAT_FILE)
+        work_dir = Path('work') / f'{symbol}_{date_str}'
     else:
-        work_dir = args.work_dir
+        work_dir = Path(args.work_dir)
 
     # Create work directory if it doesn't exist
-    os.makedirs(work_dir, exist_ok=True)
+    ensure_directory(work_dir)
 
     print("=" * 60)
     print("Report Generation Phase")
